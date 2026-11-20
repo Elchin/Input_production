@@ -459,11 +459,25 @@ class YearlyTimeSeries(UserList):
         else:
             variables = {var: climate_variables.BASELINE_LOOKUP[var] for var in variables}
 
+        if end_year < start_year:
+            raise ValueError(
+                f'baseline end_year ({end_year}) is before start_year ({start_year})'
+            )
+        # Both bounds are inclusive (as documented above, in the CLI help and
+        # in the `baseline_start_year`/`baseline_end_year` attributes).
+        baseline_years = list(range(start_year, end_year + 1))
+        missing = [yr for yr in baseline_years if yr not in self.range()]
+        if missing:
+            raise ValueError(
+                f'baseline years {start_year}-{end_year} requested but data '
+                f'is missing for {missing}'
+            )
+
         for var, method  in variables.items():
             if not var in self[start_year].dataset.data_vars:
                 continue
-            self.logger.info(f'creating baseline for {var} with  {method}')
-            ts = [self[yr].dataset[var].values for yr in range(start_year, end_year)]
+            self.logger.info(f'creating baseline for {var} with  {method} over {start_year}-{end_year} (inclusive)')
+            ts = [self[yr].dataset[var].values for yr in baseline_years]
             ts = np.array(ts)
             self.logger.debug(f'ts.shape: {ts.shape}')
             daily_avg = ts.mean(axis=0)
