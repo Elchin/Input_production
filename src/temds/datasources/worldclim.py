@@ -71,23 +71,67 @@ def url_for(variable, version='2.1', resolution='30s'):
 
 
 def download(where, in_vars, version, resolution, overwrite = False, logger=Logger() ):
-    for var in in_vars:
-        logger.info(f'worldclim.download: Downloading data.')
-        url = url_for(var, version, resolution)
-        logger.debug(f'worldclim.download: downloading {url}')
-        file_tools.download(url, where, overwrite)
+    """Download WorldClim normals archives (one .zip per variable).
 
-def prepare(where, in_vars, version, resolution, overwrite = False, logger=Logger() ):
+    Existing archives are kept unless `overwrite` is True. The 30s archives
+    are large (~19 GB for all 7 variables); they do not need to be
+    extracted, see `prepare`.
+
+    Returns
+    -------
+    dict
+        {var: Path to .zip}
+    """
+    files = {}
+    for var in in_vars:
+        url = url_for(var, version, resolution)
+        logger.info(f'worldclim.download: Downloading {url}')
+        try:
+            files[var] = file_tools.download(url, where, overwrite)
+        except FileExistsError:
+            files[var] = Path(where, Path(url).name)
+            logger.info(f'worldclim.download: {files[var]} exists, skipped')
+    return files
+
+def prepare(where, in_vars, version, resolution, overwrite = False, logger=Logger(), extract=False):
+    """Locate WorldClim data for each variable.
+
+    An already extracted folder (`<where>/wc2.1_<res>_<var>/`) is used if it
+    exists. Otherwise the archive `<where>/wc2.1_<res>_<var>.zip` is read in
+    place through GDAL's /vsizip/ virtual file system, which avoids
+    extracting ~17 GB of 30s GeoTIFFs. Pass extract=True to unzip instead.
+
+    Returns
+    -------
+    dict
+        {var: str} directory (or /vsizip/ path) containing the monthly
+        `<name>_<MM>.tif` files.
+    """
     completed = {}
     for var in in_vars:
         var_dir = name_for(var, version, resolution)
         in_dir = Path(f'{where}/{var_dir}')
-        if not in_dir.exists():
-            archive = Path(f'{where}/{var_dir}.zip')
+        archive = Path(f'{where}/{var_dir}.zip')
+        if in_dir.exists():
+            completed[var] = str(in_dir)
+        elif archive.exists() and not extract:
+            logger.debug(f'worldclim.prepare: reading {archive} via /vsizip/')
+            completed[var] = vsizip_path(archive)
+        elif archive.exists():
             logger.debug(f'worldclim.unzip: unzipping {archive}')
             file_tools.extract(archive, in_dir)
-        completed[var] = in_dir
+            completed[var] = str(in_dir)
+        else:
+            raise FileNotFoundError(
+                f'WorldClim data for {var} not found: neither {in_dir} nor '
+                f'{archive} exist. Use `TEMdownscale download worldclim`.'
+            )
     return completed
+
+
+def vsizip_path(archive):
+    """GDAL /vsizip/ prefix for an archive (absolute path, as a str)"""
+    return '/vsizip/' + str(Path(archive).resolve())
 
 
 

@@ -81,11 +81,17 @@ def download(url: str, location: Path, overwrite: bool=False):
     if not local_file.exists() or overwrite:
         location.mkdir(parents=True, exist_ok=True)
 
-        r = requests.get(url)
-        if r.status_code != 200:
-            raise FileNotFoundError(f'File to download could not be found at remote: {url}')
-        with local_file.open('wb') as new_file:
-            new_file.write(r.content)
+        # stream to a temporary name so large files (multi-GB WorldClim
+        # archives) are not held in memory and partial downloads are not
+        # mistaken for complete files
+        partial = local_file.with_name(local_file.name + '.part')
+        with requests.get(url, stream=True, timeout=600) as r:
+            if r.status_code != 200:
+                raise FileNotFoundError(f'File to download could not be found at remote: {url}')
+            with partial.open('wb') as new_file:
+                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                    new_file.write(chunk)
+        partial.replace(local_file)
     else:
         raise FileExistsError(
             f"Local file exists {local_file}"

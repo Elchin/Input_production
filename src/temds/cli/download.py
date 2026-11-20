@@ -16,7 +16,7 @@ import xarray as xr
 import cftime
 
 # from .. import cdsapi_tools
-from ..datasources import era5_daily, cmip6, topo
+from ..datasources import era5_daily, cmip6, topo, worldclim
 from ..region.region import Region
 
 from .. import pangeo_tools, file_tools
@@ -222,6 +222,33 @@ def CMIP6_daily(
             )
             ds.close()
     log.info('Download of cmip6-daily data complete!')
+
+
+@app.command()
+def WorldClim(
+        context: Context,
+        destination: common.DESTINATION_DIR,
+        variables: Annotated[str, Option(help=f"Comma separated WorldClim variables to download from {worldclim.VARS}, or 'all'")] = 'all',
+        resolution: Annotated[str, Option(help=f"WorldClim resolution, one of {worldclim.RESOLUTIONS}")] = '30s',
+        version: Annotated[str, Option(help="WorldClim version")] = '2.1',
+    ):
+    """Downloads WorldClim (v2.1) 1970-2000 monthly climate normals, the
+    high resolution reference used for delta downscaling.
+
+    Archives are saved as-is (about 19 GB for all variables at 30s) and
+    are read directly by `preprocess worldclim` without extracting them.
+    Existing archives are skipped unless --overwrite is given.
+    """
+    log = context.obj.log
+    overwrite = context.obj.overwrite
+    in_vars = worldclim.VARS if variables == 'all' else [v.strip() for v in variables.split(',')]
+    bad = [v for v in in_vars if v not in worldclim.VARS]
+    if bad or resolution not in worldclim.RESOLUTIONS:
+        log.error(f'Invalid variables {bad} or resolution {resolution}. Variables: {worldclim.VARS}; resolutions: {worldclim.RESOLUTIONS}')
+        raise Exit(1)
+    log.info(f'Downloading WorldClim {version} {resolution} {in_vars} to {destination}')
+    files = worldclim.download(destination, in_vars, version, resolution, overwrite, log)
+    log.info(f'WorldClim download complete: {[str(f) for f in files.values()]}')
 
 
 @app.command()

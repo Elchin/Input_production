@@ -1040,7 +1040,8 @@ class TEMDataset(object):
                 name = worldclim.name_for(
                     var, version, resolution, month
                 )
-                data_raster = Path(in_dir, f'{name}.tif')
+                # str join: in_dir may be a GDAL /vsizip/ path
+                data_raster = f'{in_dir}/{name}.tif'
                 
                 logger.debug((
                     f'{func_name}: loading {var} data from {data_raster} for '
