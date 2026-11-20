@@ -19,13 +19,23 @@ dependencies:
   - libgdal-netcdf=3.10.0
   - pytest=8.3.4 
   - typer=0.15.2 
+  - click>=8.0,<8.2 # typer 0.15.2 breaks with click 8.2 (TyperArgument.make_metavar TypeError on --help)
   - cf-units>=3.3.0
   - ecmwf-datastores-client=0.5.0
   - python_cmethods=2.3.2
+  - joblib   # parallel preprocess/downscale
+  - pyyaml   # region manifest.yml
+  - cftime
+  # CMIP6 from the Pangeo Google Cloud catalog (pangeo_tools.py)
+  - intake
+  - intake-esm
+  - fsspec
+  - gcsfs
+  - zarr
+  # Google Cloud / Earth Engine helpers imported by temds.tile and the
+  # ERA5 hourly GEE path (gcloud_tools.py, era5_hourly_gee.py)
+  - google-api-python-client
+  - google-auth-oauthlib
+  - earthengine-api
   - versioningit # for inserting version metadata into artifacts...
   - pip # for --editable install...maybe there is a way to do with with conda?
-
-
-
-
-
