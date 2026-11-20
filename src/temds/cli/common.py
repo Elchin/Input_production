@@ -180,6 +180,18 @@ def years_as_range_check(years: list[int], as_range: bool, default_range: list[i
     return years
 
 
+def output_exists(p) -> bool:
+    """True if `p` is an existing file or a non-empty directory.
+
+    DESTINATION_DIR arguments are created by their callback before a
+    command runs, so an *empty* directory is not existing output.
+    """
+    p = Path(p)
+    if p.is_dir():
+        return any(p.iterdir())
+    return p.exists()
+
+
 def dest_dir_callback(p):
     """Callback to create missing directories from a path ending in a
     directory

@@ -53,7 +53,7 @@ def era5_daily(
         destination = context.obj.region_directory / 'ERA5-'
 
 
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
     downloads = source
     downloads = Path(downloads)
@@ -114,9 +114,14 @@ def cmip6_daily(
     log.info('Starting preprocessing of CMIP6 Daily data')
 
     if context.obj.region:
+        if Path(destination).resolve() != (context.obj.region_directory/ name).resolve():
+            log.info(
+                f'--use-region: output goes to {context.obj.region_directory/ name}; '
+                f'DESTINATION ({destination}) is not used.'
+            )
         destination = context.obj.region_directory/ name
         
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
 
     start_year = None
@@ -218,7 +223,7 @@ def worldclim(
     else: 
         region = Region.from_mask(Mask.from_file(extent_file), logger=log)
 
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
     data = datasources.dataset.TEMDataset.from_worldclim(
             source,
@@ -260,7 +265,7 @@ def topo(
     else: 
         region = Region.from_mask(Mask.from_file(extent_file))
 
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
     topo_ds = datasources.dataset.TEMDataset.from_topo(
         source, region, 

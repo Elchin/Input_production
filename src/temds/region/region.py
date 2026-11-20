@@ -475,10 +475,18 @@ class Region(object):
             should be a key in self.data which corresponds to a dataset which
             can be exported to TEM format.
         where: Path
-            directory to save exported data to. Will be created if it does not
-            exist. Data will be saved to this directory with the name
-            {dataset_name}.nc, where dataset_name is the value of the
-            dataset_name parameter.
+            directory to save exported data to. Data is written to
+            `where`/tem_export (created if it does not exist).
+        kwargs:
+            'source_directory': Path, defaults to `where`
+                region directory (with manifest.yml) to lazily load items
+                from when they are not already loaded.
+            'cru_item': str, defaults 'crujra-downscaled'
+                region item exported as `cru_climate`
+                (to {cru_item}-historic-climate.nc)
+            'cmip_item': str, defaults 'cmip6-ssp245-downscaled'
+                region item exported as `cmip_climate`
+                (to {cmip_item}-projected-climate.nc)
 
         Questions:
          - should this export all data in a region object? Not all possible keys
@@ -503,11 +511,17 @@ class Region(object):
         if dataset_name not in TEMDS_DATASET_NAMES:
             raise NotImplementedError(f"Invalid dataset name for TEM export: {dataset_name}. Must be one of {TEMDS_DATASET_NAMES}.")
 
-        # Not really sure about this.....
-        assert self.name == where.stem, f"Region name {self.name} does not match destination directory name {where.stem}. Please ensure the destination directory is named the same as the region you want to export."  
+        source_directory = Path(kwargs.get('source_directory') or where)
+        cru_item = kwargs.get('cru_item') or 'crujra-downscaled'
+        cmip_item = kwargs.get('cmip_item') or 'cmip6-ssp245-downscaled'
+        if self.name != Path(where).name:
+            self.logger.warn(
+                f"{function_name}: region name {self.name} differs from "
+                f"destination directory name {Path(where).name}; exporting "
+                f"to {Path(where) / 'tem_export'} anyway."
+            )
 
-
-        destination = where / "tem_export"
+        destination = Path(where) / "tem_export"
         destination.mkdir(exist_ok=True, parents=True)
 
         if dataset_name == 'co2':
@@ -559,7 +573,7 @@ class Region(object):
         if dataset_name == 'topo':
             self.logger.info("Exporting topo data to TEM format...")
             if dataset_name not in self.data.keys():
-                self.lazy_import(where, 'topo')
+                self.lazy_import(source_directory, 'topo')
 
             self.logger.info("Converting topo data to TEM format...")
             T = self.data['topo'].dataset.drop(['TPI', 'drainage_class'])
@@ -576,7 +590,7 @@ class Region(object):
         if dataset_name == 'drainage':
             self.logger.info("Exporting drainage data to TEM format...")
             if 'topo' not in self.data.keys():
-                self.lazy_import(where, 'topo')
+                self.lazy_import(source_directory, 'topo')
 
             self.logger.info("Converting drainage data to TEM format...")
             D = self.data['topo'].dataset.drop(['elevation', 'TPI', 'slope', 'aspect'])
@@ -595,7 +609,7 @@ class Region(object):
             # dims, coords, etc.
             self.logger.info("...using vegetation data as a template for the run mask...")
             if 'vegetation' not in self.data.keys():
-                self.lazy_import(where, 'vegetation')
+                self.lazy_import(source_directory, 'vegetation')
             veg_ds = self.data['vegetation'].dataset
             mask = veg_ds.copy()
             mask = mask.rename({'veg_class':'run'})
@@ -623,7 +637,7 @@ class Region(object):
 
             self.logger.info("Exporting vegetation data to TEM format...")
             if dataset_name not in self.data.keys():
-                self.lazy_import(where, 'vegetation')
+                self.lazy_import(source_directory, 'vegetation')
 
             self.logger.info("Converting vegetation data to TEM format...")
             V = self.data[dataset_name].dataset
@@ -638,7 +652,7 @@ class Region(object):
         if dataset_name == 'soiltex':
             self.logger.info("Exporting soil texture data to TEM format...")
             if dataset_name not in self.data.keys():
-                self.lazy_import(where, 'soiltex')
+                self.lazy_import(source_directory, 'soiltex')
 
             self.logger.info("Converting soil texture data to TEM format...")
             ST = self.data[dataset_name].dataset
@@ -653,13 +667,11 @@ class Region(object):
         if dataset_name == 'cru_climate' or dataset_name == 'cmip_climate':
 
             if dataset_name == 'cru_climate':
-                ds_key_name = 'crujra-downscaled'
-                if 'crujra-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'crujra-downscaled')
+                ds_key_name = cru_item
             if dataset_name == 'cmip_climate':
-                ds_key_name = 'cmip6-ssp245-downscaled'
-                if 'cmip6-ssp245-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'cmip6-ssp245-downscaled')
+                ds_key_name = cmip_item
+            if ds_key_name not in self.data.keys():
+                self.lazy_import(source_directory, ds_key_name)
 
             target_vars = {
                 'tair_avg': 'mean', 
@@ -725,9 +737,9 @@ class Region(object):
             #np.nan_to_num(ds_monthly['nirr'], copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
             if dataset_name == 'cru_climate':
-                outname = 'crujra-downscaled-historic-climate.nc'
+                outname = f'{cru_item}-historic-climate.nc'
             elif dataset_name == 'cmip_climate':
-                outname = 'cmip6-ssp245-downscaled-projected-climate.nc'
+                outname = f'{cmip_item}-projected-climate.nc'
             else:
                 assert False, "This should never happen"
             self.logger.info(f"Saving file to {destination / outname}...")
@@ -740,7 +752,7 @@ class Region(object):
         if dataset_name == 'fri_fire':
             self.logger.info("Exporting FRI fire data to TEM format...")
             if 'fri-fire' not in self.data.keys():
-                self.lazy_import(where, 'fri-fire')
+                self.lazy_import(source_directory, 'fri-fire')
             self.logger.info("Converting FRI fire data to TEM format...")
             F = self.data['fri-fire'].dataset
             F['Y'] = np.arange(F.sizes['y'])
@@ -764,14 +776,14 @@ class Region(object):
             # Also need to grab the spatial reference coordinates from the reference dataset.
             if 'historic' in dataset_name:
                 if 'crujra-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'crujra-downscaled')
+                    self.lazy_import(source_directory, 'crujra-downscaled')
                 self.logger.info("Pulling time axis from cru...")
                 ts = self.data['crujra-downscaled']
                 ref_ds = ts.data[0].dataset
                 out_name = 'historic-explicit-fire.nc'
             elif 'projected' in dataset_name:
                 if 'cmip6-ssp245-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'cmip6-ssp245-downscaled')
+                    self.lazy_import(source_directory, 'cmip6-ssp245-downscaled')
                 self.logger.info("Pulling time axis from cmip...")
                 ts = self.data['cmip6-ssp245-downscaled']
                 ref_ds = ts.data[0].dataset
@@ -1023,7 +1035,7 @@ class Region(object):
                     source_id, 
                     correction_id, 
                     variables
-                    ) for year in self.data[source_id].range()
+                    ) for year in years
             )
             self.mask = mask_backup
         else:

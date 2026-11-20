@@ -110,7 +110,7 @@ def delta_method(
         save_baseline: Annotated[str, Option(help="Flag to save baseline data when it has to be calculated")] = False,
         correction_factors: Annotated[str, Option(help="Path to optional precalculated correction factor data to use, See note if --use-region flag is provided.")] = None,
         save_correction_factors: Annotated[str, Option(help="Flag to save correction factor data when it has to be calculated")] = False,
-        downscale_years: Annotated[tuple[int, int], Option(help="Start and end of years to download data for. Will default to full range available if not provided")] = None,
+        downscale_years: Annotated[tuple[int, int], Option(help="Start and end of years (inclusive) to downscale. Will default to full range available if not provided (also honoured with --parallel)")] = None,
     ):
     """This command downscale data via the delta-method
 
@@ -183,6 +183,10 @@ def delta_method(
         area.import_datasource(reference, reference_ds)
 
         log.info('Setup complete!')
+
+    if not baseline and not baseline_years:
+        log.error('Either --baseline or --baseline-years START END (inclusive) is required.')
+        sys.exit(1)
 
     if not baseline:
         log.info("Baseline data was not provided, Calculating......")

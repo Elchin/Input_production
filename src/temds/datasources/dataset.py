@@ -1274,8 +1274,6 @@ class TEMDataset(object):
         dest = gdal_tools.empty_dataset(
             dest_x, dest_y, dest_crs, dest_gt, n_ts, gdal_type
         )
-        driver = gdal.GetDriverByName('GTiff')
-        driver.CreateCopy('sample-dest.tif', dest)
 
         source_crs = working_dataset.rio.crs.to_wkt()
         source = gdal_tools.empty_dataset(
