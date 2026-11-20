@@ -13,6 +13,23 @@ import geopandas as gpd
 import temds
 from temds import tile 
 
+# test_aoi.py imports `temds.aoitools`, which no longer exists.
+collect_ignore = ['test_aoi.py']
+
+# These modules need locally generated data under working/ (see
+# pytest_configure); skip them instead of erroring when it is absent.
+_NEEDS_WORKING_DATA = {'test_crujra.py', 'test_tile.py', 'test_worldclim.py'}
+
+
+def pytest_collection_modifyitems(config, items):
+  if pathlib.Path('working').exists():
+    return
+  skip = pytest.mark.skip(reason='needs local data in working/ (not in the repo)')
+  for item in items:
+    if item.fspath.basename in _NEEDS_WORKING_DATA:
+      item.add_marker(skip)
+
+
 def pytest_configure(config):
     '''Setup any global variables that should be shared across all tests.'''
     pytest.CRU_L1_FOLDER = 'working/02-arctic/cru-jra-standard/'
