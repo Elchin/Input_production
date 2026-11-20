@@ -42,7 +42,8 @@ def generic_delta_add(baseline, reference):
 ## nirr baseline is ~1e-6 W/m^2 while WorldClim srad is ~1e-3, giving factors
 ## of ~1e5 that blow up any future (non-zero) radiation in those months.
 ##
-## Choice made here (documented in README "Downscaling method"):
+## Agreed defaults (reviewed with the TEM team, Nov 2026; documented in
+## README "Downscaling method"):
 ##   * where |baseline| < MIN_BASELINE[var] the factor is 1 ("no change"),
 ##     i.e. the coarse value is passed through. The downscaled climatology
 ##     then differs from the reference by at most ~MIN_BASELINE there.

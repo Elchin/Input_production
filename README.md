@@ -6,6 +6,8 @@
 - [Data sources](#data-sources)
 - [Processing chain](#processing-chain)
 - [Downscaling method](#downscaling-method)
+- [Changelog](#changelog)
+- [Known issues / TODO](#known-issues--todo)
 - [Use](#use)
 - [Installation](#installation)
 - [Tests](#tests)
@@ -32,7 +34,7 @@ downscaling) and exported into model-ready formats.
 | [ERA5 daily statistics](https://cds.climate.copernicus.eu/datasets/derived-era5-single-levels-daily-statistics) | alternative historical forcing | Copernicus Climate Data Store (`derived-era5-single-levels-daily-statistics`); hourly ERA5 via Google Earth Engine in `era5_hourly_gee.py` | CDS account, accepted licence, Personal Access Token (`~/.ecmwfdatastoresrc`) | `download era5-daily`, `preprocess era5-daily` |
 | [CMIP6](https://pangeo-data.github.io/pangeo-cmip6-cloud/) daily (table `day`): tas, pr, rsds, huss, psl (required), tasmin, tasmax, sfcWind (optional) | projections (historical, ssp126/245/370/585) | Pangeo Google Cloud catalog `https://storage.googleapis.com/cmip6/pangeo-cmip6.json` | public (anonymous GCS) | `download cmip6-daily`, `preprocess cmip6-daily` |
 | [GMTED2010](https://www.usgs.gov/coastal-changes-and-impacts/gmted2010) mean elevation 7.5 arc-second (`mn75_grd`) | topography (elevation, slope, aspect, TPI, drainage) and surface pressure for CMIP6 vapo | USGS `edcintl.cr.usgs.gov/.../GMTED/Grid_ZipFiles/mn75_grd.zip` | public | `download elevation`, `preprocess topo` |
-| [SoilGrids](https://www.isric.org/explore/soilgrids) 1 km clay/sand/silt, 15-30, 30-60, 60-100 cm | soil texture (%) | ISRIC `https://files.isric.org/soilgrids/latest/data_aggregated/1000m/` | public | `downscale extra-tem-files` (expects `<data>/soiltexture/<var>_<depth>_mean_1000.tif`) |
+| [SoilGrids](https://www.isric.org/explore/soilgrids) 1 km clay/sand/silt, 0-5, 5-15, 15-30, 30-60, 60-100 cm | soil texture (%) | ISRIC `https://files.isric.org/soilgrids/latest/data_aggregated/1000m/` | public | `downscale extra-tem-files` (expects `<data>/soiltexture/<var>_<depth>_mean_1000.tif`) |
 | TEM land cover (`TEM_Landcover_V4.tif` + `TEMLandcoverClassDictionary.csv`, H. Genet) | vegetation community type (CMT) | Google Drive folder shared by H. Genet (see `datasources/vegetation.py`) | link | `downscale extra-tem-files` (`<data>/vegetation/Jan2025_TEM_Landcover2/`) |
 | [RESOLVE Ecoregions 2017](https://ecoregions.appspot.com/) | ecoregion / biome / realm / alpine rules for the CMT mapping | `https://storage.googleapis.com/teow2016/Ecoregions2017.zip` | public | `<data>/mask/Ecoregions2017/` |
 | [geoBoundaries CGAZ ADM1](https://www.geoboundaries.org/) | country / state rules for the CMT mapping | `https://github.com/wmgeolab/geoBoundaries/raw/main/releaseData/CGAZ/geoBoundariesCGAZ_ADM1.zip` | public | `<data>/mask/geoBoundariesCGAZ_ADM1/` |
@@ -100,18 +102,66 @@ Plain delta scaling (no quantile mapping):
    temperatures (units of the reference) and `reference / baseline` for
    `prec`, `nirr`, `vapo`, `wind` (dimensionless, `units = "1"`). Units are
    compared with cf_units and converted when needed.
-3. Multiplicative factors are guarded: where |baseline| is below
-   `corrections.MIN_BASELINE` (nirr 1 W/m2, prec 0.1 mm/month, vapo 1e-3 kPa,
-   wind 0.1 m/s) the factor is 1 (coarse value kept), and factors are clipped to
-   `[0, corrections.MAX_FACTOR]` (10; 20 for prec). Without this, polar-night
-   radiation baselines of ~1e-6 W/m2 gave factors of ~1e5.
+3. Multiplicative factors are guarded. These are the agreed defaults
+   (reviewed with the TEM team, Nov 2026); they can be overridden per call in
+   `temds.corrections`:
+
+   | variable | `MIN_BASELINE` (factor = 1 below it) | `MAX_FACTOR` (clip) |
+   |---|---|---|
+   | nirr | 1 W/m2 | 10 |
+   | prec | 0.1 mm/month | 20 |
+   | vapo | 1e-3 kPa | 10 |
+   | wind | 0.1 m/s | 10 |
+
+   Where |baseline| is below the threshold the factor is 1 (the coarse value
+   is kept); all factors are clipped to `[0, MAX_FACTOR]`. Without this,
+   polar-night radiation baselines of ~1e-6 W/m2 gave factors of up to ~1e5-1e6.
+   On the North Slope 4 km test this sets nirr factors to 1 in the two
+   polar-night months; no factor reaches the cap.
 4. Each daily value is corrected with its month's factor.
 
-Soil texture is the thickness-weighted mean of the 15-30, 30-60 and 60-100 cm
-SoilGrids layers (g/kg / 10 = %); the 0-15 cm layers are not used. SoilGrids
-nodata pixels are NaN. Vegetation classes without a CMT rule (currently
-'Cedar forest') and non-vegetated classes become CMT00 (not run); the
-former are reported in the log.
+Soil texture is the thickness-weighted mean of the 0-5, 5-15, 15-30, 30-60
+and 60-100 cm SoilGrids layers (weights 5/10/15/30/40 cm, i.e. 0-100 cm;
+g/kg / 10 = %). All five layers must be present in `<data>/soiltexture/`.
+SoilGrids nodata pixels are NaN.
+
+Vegetation: non-vegetated classes and classes without a CMT rule (currently
+'Cedar forest') become CMT00 (not run); the latter are reported in the log.
+Alpine areas (RESOLVE alpine ecoregions) get the alpine CMTs: CMT20 / CMT21.
+
+## Changelog
+
+Branch `temds-fixes-4km-test` (Nov 2026, from the North Slope 4 km test run):
+
+- Output changes to expect compared with earlier runs:
+  - **Alpine CMTs**: the alpine rule used to never match, so alpine areas got
+    the lowland CMTs. They now become CMT20/CMT21 (on the North Slope test box
+    4.3% of pixels, Brooks Range, moved to CMT20). Agreed with the TEM team.
+  - **Soil texture** now covers 0-100 cm (the 0-5 and 5-15 cm layers were
+    previously left out) and SoilGrids nodata is NaN instead of -3276.8.
+  - **Climate baselines** include the end year (`--baseline-years 1971 2000`
+    is 30 years, was 29).
+  - **CMIP6** data is no longer shifted by about one grid cell (stale
+    GeoTransform); multiplicative correction factors are guarded (see above).
+  - veg_class, run mask and drainage_class are int32.
+- New: `download worldclim`, CMIP6 tasmin/tasmax/sfcWind, per-model default
+  members with variable checks, `export --cmip-item/--cru-item`, unit checks.
+
+## Known issues / TODO
+
+- **Cedar forest** (TEM_Landcover_V4 class 22) has no CMT rule. It is left as
+  CMT00 (not run) and flagged with a warning in the log on purpose until a CMT
+  is chosen (see `datasources/vegetation.py`, `TEMDataset.from_vegetation`).
+- No tussock tundra (CMT05) appears on the North Slope test box: the input
+  land cover map has no 'Graminoid tundra' there; the class mapping itself is
+  correct.
+- Regions that partly cross the antimeridian are not handled by the CMIP6
+  download (regions fully on one side, or containing the pole, are).
+- CESM2 historical has no daily tasmin/tasmax on Pangeo, so tair_min/tair_max
+  are not produced for it.
+- CRU-JRA (CEDA) and ERA5 (CDS) paths need credentials and were not part of
+  the 4 km test.
+- Fire return interval (`fri-fire.nc`) is synthetic.
 
 ## Use
 

@@ -811,6 +811,8 @@ class TEMDataset(object):
         # Developed, Snow/Ice and Other are intentionally CMT00 (not run by
         # TEM); anything else (e.g. 'Cedar forest', value 22 in
         # TEM_Landcover_V4) has no community rule and needs a decision.
+        # TODO(known issue): Cedar forest stays CMT00 + warning for now
+        # (agreed Nov 2026); see vegetation.NON_VEGETATED_CLASSES and README.
         non_veg = temds.datasources.vegetation.NON_VEGETATED_CLASSES
         unmapped = ecotype[(ecotype['CMT'] == 'CMT00') & (~ecotype['classname'].isin(non_veg))]
         if len(unmapped) > 0:
