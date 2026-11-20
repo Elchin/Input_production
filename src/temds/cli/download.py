@@ -174,10 +174,12 @@ def CMIP6_daily(
 
     missing_required, missing_optional = cmip6.check_variables(items['variable_id'])
     if missing_optional:
+        tem_names = {'tasmin': 'tair_min', 'tasmax': 'tair_max', 'sfcWind': 'wind'}
         log.warn(
             f'{source_model} {experiment} {ensemble} has no daily '
-            f'{missing_optional} on Pangeo; the matching TEM variables '
-            '(tair_min/tair_max/wind) will not be produced from CMIP6.'
+            f'{missing_optional} on Pangeo; '
+            f'{[tem_names.get(v, v) for v in missing_optional]} '
+            'will not be produced from CMIP6.'
         )
     if missing_required:
         suggest = cmip6.members_with_variables(all_members, cmip6.REQUIRED_SOURCE_VARS)
