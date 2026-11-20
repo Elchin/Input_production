@@ -6,6 +6,8 @@ Objects to manage data for TEMDS project
 
 """
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from copy import deepcopy
 import operator
@@ -532,17 +534,21 @@ class TEMDataset(object):
                 logger.info(f'{f2}: Writing {raster_fpath}')
                 out.write_band(1, burned)
 
+        # Per-call scratch directory (these used to be fixed paths in /tmp,
+        # so two concurrent runs on one node clobbered each other).
+        tmp_dir = Path(tempfile.mkdtemp(prefix='temds_veg_'))
+        logger.debug(f'{func_name}: scratch directory {tmp_dir}')
+        tmp = lambda n: str(tmp_dir / n)
         files = [
-            '/tmp/country_raster_temp_from_veg.tif',
-            '/tmp/state_raster_temp_from_veg.tif',
-            '/tmp/eco_raster_temp_from_veg.tif',
-            '/tmp/biome_raster_temp_from_veg.tif',
-            '/tmp/ecobiome_raster_temp_from_veg.tif',
-            '/tmp/realm_raster_temp_from_veg.tif',
-            '/tmp/TEM_Landcover_V4_temp_from_veg.tif',
-            '/tmp/drainage_raster_temp_from_veg.tif',
+            tmp('country_raster_temp_from_veg.tif'),
+            tmp('state_raster_temp_from_veg.tif'),
+            tmp('eco_raster_temp_from_veg.tif'),
+            tmp('biome_raster_temp_from_veg.tif'),
+            tmp('ecobiome_raster_temp_from_veg.tif'),
+            tmp('realm_raster_temp_from_veg.tif'),
+            tmp('TEM_Landcover_V4_temp_from_veg.tif'),
+            tmp('drainage_raster_temp_from_veg.tif'),
         ]
-        [os.unlink(f) for f in files if os.path.exists(f)]
 
         # meta = ER.meta.copy()
         meta = {
@@ -558,12 +564,12 @@ class TEMDataset(object):
         }
 
         # meta.update(compress='lzw')
-        burn_gdf('/tmp/country_raster_temp_from_veg.tif', country_geo_df, 'ctry_idx', meta)
-        burn_gdf('/tmp/state_raster_temp_from_veg.tif', state_geo_df, 'state_idx', meta)
-        burn_gdf('/tmp/eco_raster_temp_from_veg.tif', eco_geo_df, 'eco_idx', meta)
-        burn_gdf('/tmp/biome_raster_temp_from_veg.tif', biome_geo_df, 'biome_idx', meta)
-        burn_gdf('/tmp/ecobiome_raster_temp_from_veg.tif', ecobiome_geo_df, 'ecobiome_idx', meta)
-        burn_gdf('/tmp/realm_raster_temp_from_veg.tif', realm_geo_df, 'realm_idx', meta)
+        burn_gdf(tmp('country_raster_temp_from_veg.tif'), country_geo_df, 'ctry_idx', meta)
+        burn_gdf(tmp('state_raster_temp_from_veg.tif'), state_geo_df, 'state_idx', meta)
+        burn_gdf(tmp('eco_raster_temp_from_veg.tif'), eco_geo_df, 'eco_idx', meta)
+        burn_gdf(tmp('biome_raster_temp_from_veg.tif'), biome_geo_df, 'biome_idx', meta)
+        burn_gdf(tmp('ecobiome_raster_temp_from_veg.tif'), ecobiome_geo_df, 'ecobiome_idx', meta)
+        burn_gdf(tmp('realm_raster_temp_from_veg.tif'), realm_geo_df, 'realm_idx', meta)
 
         extent_raster = region.empty_gdal_dataset()
         logger.info(f"{func_name}: Convert the TEM_Landcover_V4 to match the  AOI raster in extents and resolution")
@@ -575,7 +581,7 @@ class TEMDataset(object):
             ))
         extent_raster.FlushCache()
         driver = gdal.GetDriverByName('GTiff')
-        driver.CreateCopy("/tmp/TEM_Landcover_V4_temp_from_veg.tif",extent_raster)
+        driver.CreateCopy(tmp('TEM_Landcover_V4_temp_from_veg.tif'), extent_raster)
         del(driver)
 
         if 'topo' in region.data:
@@ -588,7 +594,7 @@ class TEMDataset(object):
                 raise RuntimeError(f"{func_name}: Problem loading topo data from {destination}. Expection: {e}")
 
         # Make sure we only write out the variable we are interested in.
-        topo.dataset['drainage_class'].astype(np.int32).rio.to_raster("/tmp/drainage_raster_temp_from_veg.tif")
+        topo.dataset['drainage_class'].astype(np.int32).rio.to_raster(tmp('drainage_raster_temp_from_veg.tif'))
 
         index_names = ['ctry_idx', 'state_idx', 'eco_idx', 'biome_idx', 'ecobiome_idx', 'realm_idx', 'lc_idx', 'drain_idx']
         
@@ -606,7 +612,10 @@ class TEMDataset(object):
         
         # This is a table with one row per pixel and columns for each index.
         logger.info(f"{func_name}: Creating the ecotype table by concatening all the indices...")
-        ecotype = pd.concat(list(generate_indices(files, index_names)), axis=1)
+        try:
+            ecotype = pd.concat(list(generate_indices(files, index_names)), axis=1)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         
         logger.info(f"{func_name}: Loading the land cover classification...")
         classif = pd.read_csv(land_cover_classes)
@@ -678,21 +687,18 @@ class TEMDataset(object):
 
         # Add an alpine column
         ecotype['alpine'] = 'N/A'
-        alpine_idx = ( ecotype['ECO_NAME'].str.contains('alpine', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('montane', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('mountain', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('mountains', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('range', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('rockies', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('cordillera', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('rock', case=False) )
-        ecotype['alpine'] = np.where(alpine_idx, 1, 0)
+        alpine_idx = ecotype['ECO_NAME'].fillna('').str.contains(
+            'alpine|montane|mountain|range|rockies|cordillera|rock', case=False
+        )
+        # NOTE: the CMT rules below compare against the string 'alpine'; this
+        # used to be set to 1/0, so CMT20/CMT21 could never be assigned.
+        ecotype['alpine'] = np.where(alpine_idx, 'alpine', 'N/A')
 
         # add a community column
-        ecotype['community '] = 'N/A'
+        ecotype['community'] = 'N/A'
 
         idx = ( (ecotype['classname'] == 'White Spruce forest') )
-        ecotype['community'] = np.where(idx, 'white spruce forest', ecotype['community '])
+        ecotype['community'] = np.where(idx, 'white spruce forest', ecotype['community'])
 
         idx = ( (ecotype['classname'] == 'Black Spruce forest') | \
                 (ecotype['classname'] == 'Spruce forest') | \
@@ -795,6 +801,21 @@ class TEMDataset(object):
         ecotype['CMT'] = np.where((ecotype['community'] == 'wetsedge tundra') & (ecotype['REALM'] == 'Palearctic'), 'CMT77', ecotype['CMT'])
 
         ecotype['CMT_num'] = pd.to_numeric(ecotype['CMT'].str.extract('(\d+)', expand=False)).fillna(np.int32(-9999)).astype(np.int32)
+
+        # Report land cover classes that fall through to CMT00. Unclassified,
+        # Developed, Snow/Ice and Other are intentionally CMT00 (not run by
+        # TEM); anything else (e.g. 'Cedar forest', value 22 in
+        # TEM_Landcover_V4) has no community rule and needs a decision.
+        non_veg = temds.datasources.vegetation.NON_VEGETATED_CLASSES
+        unmapped = ecotype[(ecotype['CMT'] == 'CMT00') & (~ecotype['classname'].isin(non_veg))]
+        if len(unmapped) > 0:
+            counts = unmapped['classname'].value_counts().to_dict()
+            logger.warn(
+                f'{func_name}: land cover classes without a CMT rule were set '
+                f'to CMT00 (pixels): {counts}'
+            )
+        summary = ecotype['CMT'].value_counts(normalize=True).round(4).to_dict()
+        logger.info(f'{func_name}: CMT fractions: {summary}')
 
         logger.info(f'{func_name}: Creating empty xarray dataset')
         newDS = TEMDataset.from_region(region, 

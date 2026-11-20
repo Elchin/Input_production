@@ -39,9 +39,20 @@ def extra_tem_files(
 
     ):
     """
-    Function to prepare extra files for TEM, e.g.: vegetation, etc
+    Prepare the extra TEM inputs for a region (--use-region is required):
+    synthetic FRI fire, vegetation (CMT) from TEM_Landcover_V4 + RESOLVE
+    ecoregions + geoBoundaries, and soil texture from SoilGrids.
+
+    DATA_PATH must contain vegetation/, mask/ and soiltexture/ laid out as
+    described in the README. DESTINATION is the region directory (used to
+    find topo.nc). The local --overwrite and the global --overwrite flag
+    are equivalent.
     """
     log = context.obj.log
+    overwrite = overwrite or context.obj.overwrite
+    if not context.obj.region:
+        log.error('downscale extra-tem-files needs --use-region')
+        sys.exit(1)
 
 
     log.info('Preparing TEM fri fire data...')
