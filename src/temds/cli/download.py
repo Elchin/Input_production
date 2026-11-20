@@ -10,7 +10,7 @@ TODO:
 """
 from pathlib import Path
 
-from typer import Typer, Argument, Option, Context
+from typer import Typer, Argument, Option, Context, Exit
 from typing import Annotated
 import xarray as xr
 import cftime
@@ -117,7 +117,9 @@ def CMIP6_daily(
         experiment: Annotated[str, Argument(help=f"Name of CMIP6 experiment from {cmip6.EXPERIMENTS}")],
         source_model: Annotated[str, Argument(help="Name of CMIP6 model that provides daily data (i.e. CESM2)")],
         years: Annotated[tuple[int, int], Argument(help="Start and end of years to download data for. Will default to full range of experiment provided (See Note on 'years').")] = None,
-        ensemble: Annotated[str, Option(help=f"CMIP6 ensemble/member_id (i.e. {cmip6.DEFAULT_ENSEMBLE})")] = cmip6.DEFAULT_ENSEMBLE ,
+        ensemble: Annotated[str, Option(help=f"CMIP6 ensemble/member_id. Defaults per model: {cmip6.DEFAULT_ENSEMBLES}, otherwise {cmip6.DEFAULT_ENSEMBLE}")] = None,
+        buffer_cells: Annotated[float, Option(help="Number of native GCM grid cells to download around the region so coarse cells fully cover its edges")] = 2,
+        allow_missing: Annotated[bool, Option(help=f"Download even if required variables ({', '.join(cmip6.REQUIRED_SOURCE_VARS)}) are missing for the member")] = False,
     ):
     """This command downloads CMIP6 daily data from Pangeo. 
     
@@ -141,40 +143,67 @@ def CMIP6_daily(
         if start_year < 1850:
             log.error(f"Start year must be greater than or equal to  1850 for historical experiments. Was given {start_year}.")
             return
-        if start_year > 2014:
+        if end_year > 2014:
             log.error(f"End year must be less than or equal to than 2014 for historical experiments. Was given {end_year}.")
-            return
+            raise Exit(1)
     else:
         start_year = 2015 if start_year is None else start_year
         end_year =  2100 if end_year is None else end_year
         if start_year < 2015:
             log.error(f"Start year must be greater than or equal to  2015 for projected (ssp) experiments. Was given {start_year}.")
             return
-        if start_year > 2100:
+        if end_year > 2100:
             log.error(f"End year must be less than or equal to than 2100 for projected (ssp) experiments. Was given {end_year}.")
-            return
+            raise Exit(1)
     if start_year > end_year:
         log.error(f"Start year must be less than or equal to End year. Start year was {start_year}, and end year {end_year}.")
         return
     log.info(f'For years {start_year} - {end_year}')
+    # Calendar-neutral bounds; pangeo_tools.download converts them to the
+    # model's own calendar (noleap, proleptic_gregorian, 360_day, ...).
     time_bounds = (
-        cftime.DatetimeNoLeap(start_year, 1, 1),
-        cftime.DatetimeNoLeap(end_year+1, 1, 1)
+        cftime.datetime(start_year, 1, 1, calendar='standard'),
+        cftime.datetime(end_year+1, 1, 1, calendar='standard')
     )
+    if ensemble is None:
+        ensemble = cmip6.default_ensemble(source_model)
     log.info(f'Searching catalog for daily {source_model}, {experiment}, {ensemble}')
-    items = cmip6.search_pangeo(source_model, experiment, ensemble)
-    log.info(f'.. Found {len(items)} items.')
+    all_members = cmip6.search_pangeo(source_model, experiment, None)
+    items = all_members[all_members['member_id'] == ensemble]
+    log.info(f'.. Found {len(items)} items: {sorted(items["variable_id"])}')
+
+    missing_required, missing_optional = cmip6.check_variables(items['variable_id'])
+    if missing_optional:
+        log.warn(
+            f'{source_model} {experiment} {ensemble} has no daily '
+            f'{missing_optional} on Pangeo; the matching TEM variables '
+            '(tair_min/tair_max/wind) will not be produced from CMIP6.'
+        )
+    if missing_required:
+        suggest = cmip6.members_with_variables(all_members, cmip6.REQUIRED_SOURCE_VARS)
+        msg = (
+            f'{source_model} {experiment} {ensemble} is missing required '
+            f'daily variables {missing_required}. '
+            f'Members with all of {cmip6.REQUIRED_SOURCE_VARS}: {suggest or "none"}. '
+            'Pass one with --ensemble, or use --allow-missing to download anyway.'
+        )
+        if allow_missing:
+            log.warn(msg)
+        else:
+            log.error(msg)
+            raise Exit(1)
 
     spatial_bounds = (0, 30, 360, 90)
     if context.obj.region:
         area = context.obj.region
 
-        spatial_bounds = area.get_extent(4326, 1)
+        spatial_bounds = list(area.get_extent(4326, 1))
+        # pangeo data is 0..360; pangeo_tools.download handles the wrap
         spatial_bounds[0]+=360
         spatial_bounds[2]+=360
         spatial_bounds = tuple(spatial_bounds)
 
-    log.info(f'Target bounds are {spatial_bounds}')
+    log.info(f'Target bounds are {spatial_bounds} (+{buffer_cells} GCM cells buffer)')
     for row in items.index:
         meta = items.loc[row].to_dict() 
         log.info(
@@ -188,7 +217,8 @@ def CMIP6_daily(
                 meta['zstore'], 
                 time_bounds, 
                 spatial_bounds,
-                zlib= True, complevel= 9 
+                zlib= True, complevel= 9,
+                buffer_cells=buffer_cells,
             )
             ds.close()
     log.info('Download of cmip6-daily data complete!')

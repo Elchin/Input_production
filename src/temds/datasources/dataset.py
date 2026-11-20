@@ -1894,6 +1894,15 @@ class YearlyDataset(TEMDataset):
         
         # return data
         ## we use 'noleap' calender
+        calendar = data.time.dt.calendar
+        if calendar == '360_day':
+            msg = (
+                f'{func_name}: 360_day calendars are not supported (converting '
+                'to noleap would leave 5 missing days per year).'
+            )
+            logger.error(msg)
+            raise errors.YearlyTimeSeriesError(msg)
+        # drops Feb 29 for standard/gregorian/proleptic_gregorian calendars
         data = data.convert_calendar('noleap')
         if data.time.size != 365:
             msg = (
@@ -1908,7 +1917,15 @@ class YearlyDataset(TEMDataset):
         new = YearlyDataset(year, data, logger=logger)
 
         source = cmip6.NAME
+        found = [v for v in climate_variables.aliases_for(source) if v in new.dataset.data_vars]
+        missing_required, missing_optional = cmip6.check_variables(found)
+        if missing_required:
+            logger.warn(f'{func_name}: {year}: required CMIP6 variables missing: {missing_required}')
+        if missing_optional:
+            logger.info(f'{func_name}: {year}: optional CMIP6 variables not present: {missing_optional}')
         for std_var, var in climate_variables.aliases_for(source, 'dict').items():
+            if var not in new.dataset.data_vars:
+                continue
             if climate_variables.has_conversion(std_var, source):
                 logger.info(f'{func_name}: Converting units for {var} to {std_var}')
                 new.dataset[var].values = climate_variables.to_std_units(
@@ -1923,9 +1940,10 @@ class YearlyDataset(TEMDataset):
         if calcualte_vapo:
             new.dataset = cmip6.callback_psl_to_vapo(new.dataset, logger, elevation=elevation)
 
-        new.dataset = new.dataset.rename(
-            climate_variables.aliases_for(cmip6.NAME, 'dict_r')
-        )
+        new.dataset = new.dataset.rename({
+            k: v for k, v in climate_variables.aliases_for(cmip6.NAME, 'dict_r').items()
+            if k in new.dataset.variables
+        })
   
         verified, reasons = new.verify()
         if not verified:

@@ -97,8 +97,13 @@ def cmip6_daily(
         # overwrite: common.OVERWRITE_FLAG = False,
         # cleanup: common.CLEANUP_FLAG = False
     ):
-    """This command preprocesses CMIP6 daily data to use in downscaling. If topo
-    is provided the variable for VAPO is calculated otherwise it is not.
+    """This command preprocesses CMIP6 daily data to use in downscaling.
+
+    Produces tair_avg, prec, nirr and, when the member provides them,
+    tair_min/tair_max (tasmin/tasmax) and wind (sfcWind). vapo is
+    calculated from psl, huss and tas only when topo is available (the
+    region's topo.nc, or --topo without a region); otherwise it is skipped
+    with a warning.
     """
     log = context.obj.log
     overwrite = context.obj.overwrite
@@ -141,13 +146,13 @@ def cmip6_daily(
     try: 
         if context.obj.region:
             area = context.obj.region
-            try:
-                topo = datasources.dataset.TEMDataset(
-                        context.obj.region_directory/'topo.nc', log
-                )
-                area.import_datasource('topo', topo)
-            except:
-                pass
+            topo_file = context.obj.region_directory/'topo.nc'
+            if 'topo' not in area.data and topo_file.exists():
+                try:
+                    topo = datasources.dataset.TEMDataset(topo_file, log)
+                    area.import_datasource('topo', topo)
+                except Exception as e:
+                    log.warn(f'Could not load {topo_file}: {e}')
 
             log.info('Preprocessing to region')
             context.obj.runtime_data['source'] = data
@@ -157,7 +162,12 @@ def cmip6_daily(
                 callback_fn = cmip6.callback_psl_to_vapo
                 elevation = area.data['topo'].dataset['elevation']
             else:
-                log.info('With out VAPO, no topo found')
+                log.warn(
+                    'No topo found for the region: vapo will NOT be produced '
+                    '(it needs elevation to turn psl into surface pressure). '
+                    'Run `preprocess topo` first and pass --load-item topo '
+                    '(or omit --no-load-all).'
+                )
                 callback_fn = None
                 elevation = None
 
@@ -171,11 +181,11 @@ def cmip6_daily(
             destination_format = name+'-{year}.nc'
             if topo:
                 log.info('Adding VAPO')
-                topo = datasources.dataset.TEMdataset(topo)
+                topo = datasources.dataset.TEMDataset(topo)
                 elevation = topo.dataset['elevation']
                 data.dataset = cmip6.callback_psl_to_vapo(data.dataset, log, elevation=elevation)
             else:
-                log.info('Skipping VAPO, no topo data')
+                log.warn('No --topo given: vapo will NOT be produced (needs elevation).')
 
             data.save(destination, destination_format, overwrite=overwrite)
     except FileExistsError:
