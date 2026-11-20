@@ -24,6 +24,7 @@ import pyproj
 import xarray as xr
 from joblib import Parallel, delayed
 import shapely
+import shapely.geometry
 
 # from ..gdal_tools import empty_dataset
 from .. import corrections, downscalers
@@ -34,7 +35,7 @@ from .. import gdal_tools
 from .. import util
 from .mask import Mask
 from .manifest import Manifest
-from .tools import mask_boundary_compatibility_report, total_extent_as_geoseries
+from .tools import mask_boundary_compatibility_report, total_extent_as_geoseries, align_to_resolution
 from temds.constants import TEMDS_DATASET_NAMES
 
 import temds
@@ -126,10 +127,45 @@ class Region(object):
         return msg
 
     def get_extent(self, crs=None, align_to=None):
+        """Bounds (minx, miny, maxx, maxy) of the region boundary, optionally
+        in another `crs` and aligned outward to `align_to` units.
 
+        When reprojecting, the boundary is densified first: straight edges
+        in a polar projection are curved in lon/lat, so reprojecting only
+        the vertices underestimates the extent. If the boundary contains
+        the North/South pole the geographic extent is widened to all
+        longitudes and to the pole.
+        """
         boundary = self.boundary
         if crs:
+            minx, miny, maxx, maxy = boundary.total_bounds
+            seg = max(maxx - minx, maxy - miny) / 100.0
+            if seg > 0:
+                boundary = boundary.segmentize(seg)
             boundary = boundary.to_crs(crs)
+            target = pyproj.CRS(crs)
+            if target.is_geographic:
+                bounds = list(total_extent_as_geoseries(boundary).total_bounds)
+                for pole_lat in (90, -90):
+                    pole = gpd.GeoSeries(
+                        [shapely.geometry.Point(0, pole_lat)], crs=target
+                    ).to_crs(self.boundary.crs)
+                    try:
+                        has_pole = bool(self.boundary.union_all().contains(pole.iloc[0]))
+                    except Exception:
+                        has_pole = False
+                    if has_pole:
+                        bounds[0], bounds[2] = -180.0, 180.0
+                        if pole_lat > 0:
+                            bounds[3] = 90.0
+                        else:
+                            bounds[1] = -90.0
+                extent = gpd.GeoSeries(
+                    shapely.geometry.box(*bounds), [0], boundary.crs
+                )
+                if align_to:
+                    extent = align_to_resolution(extent, align_to)
+                return extent.total_bounds
 
         return total_extent_as_geoseries(boundary, align_to).total_bounds
 
