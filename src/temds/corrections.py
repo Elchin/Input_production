@@ -15,6 +15,8 @@ original bash script code is in each docstring
 import copy
 import numpy as np
 
+from . import climate_variables
+
 def generic_delta_add(baseline, reference):
     """Generic correction factor calculation for additive
     delta downscaling  
@@ -125,3 +127,64 @@ LOOKUP = {
     'vapo': _mul_for('vapo'),
     'wind': _mul_for('wind'),
 } 
+
+
+def calculate(var, baseline, reference, logger=None):
+    """Calculate correction factors for `var` with unit handling.
+
+    Units are compared with cf_units (so 'celsius' == 'degree_Celsius',
+    'W/m^2' == 'kilogram-second^-3', 'mm' == '0.001 meter'). If they are
+    different but convertible the baseline is converted to the reference
+    units first; if they are not convertible a ValueError is raised.
+
+    The result carries a `units` attribute: the reference units for
+    additive factors, '1' (dimensionless) for multiplicative factors, and
+    a `correction_method` attribute.
+
+    Parameters
+    ----------
+    var: str
+        key in LOOKUP
+    baseline, reference: xr.DataArray
+    logger: temds.logger.Logger, optional
+
+    Returns
+    -------
+    xr.DataArray
+    """
+    func = LOOKUP[var]
+    b_units = baseline.attrs.get('units')
+    r_units = reference.attrs.get('units')
+    if not (b_units and r_units):
+        if logger:
+            logger.warn(
+                f'Variable {var} is missing units in the baseline ({b_units!r}) '
+                f'or reference ({r_units!r}); factors are computed as-is.'
+            )
+    elif not climate_variables.units_equivalent(b_units, r_units):
+        try:
+            converted = climate_variables.convert_units(
+                baseline.values, b_units, r_units
+            )
+        except ValueError as e:
+            raise ValueError(
+                f'Units for {var} are incompatible: baseline {b_units!r}, '
+                f'reference {r_units!r} ({e})'
+            )
+        if logger:
+            logger.info(f'Converting {var} baseline from {b_units} to {r_units}')
+        baseline = baseline.copy(data=converted)
+
+    current = func(baseline, reference)
+    # keep long_name, standard_name, etc. from the baseline
+    attrs = dict(baseline.attrs)
+    method = getattr(func, 'method', None)
+    if method == 'multiplicative':
+        attrs['units'] = '1'
+    elif r_units:
+        attrs['units'] = r_units
+    if method:
+        attrs['correction_method'] = method
+    current.attrs = attrs
+    current.name = var
+    return current

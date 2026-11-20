@@ -905,21 +905,10 @@ class Region(object):
         # for var, info in variables.items():
         for var in variables:
             func = corrections.LOOKUP[var]
-            self.logger.info(f'.. Calculating correction factor for {var} with {func}')
-
-            current = func(baseline[var], reference[var])
-
-            if not(baseline[var].attrs.get('units') and reference[var].attrs.get('units')):
-                self.logger.warn(f"One of the datasets for variable {var} is missing units. This may cause issues with the correction factor calculation. Please ensure that both datasets have units specified in their attributes.")
-            elif baseline[var].attrs.get('units') != reference[var].attrs.get('units'):
-                # could be smarter here and use CFUnits to see if they are actually the same unit in a different form...
-                self.logger.warn(f"Units for variable {var} do not match between baseline and reference datasets. This may cause issues with the correction factor calculation. Please ensure that both datasets have the same units specified in their attributes.")   
-            else:
-                current.attrs['units'] = reference[var].attrs['units']
-
-            # This picks up any other attributes, like long_name, standard_name, etc.
-            current.attrs.update(baseline[var].attrs)
-
+            self.logger.info(f'.. Calculating correction factor for {var} with {func.__name__}')
+            current = corrections.calculate(
+                var, baseline[var], reference[var], logger=self.logger
+            )
             current.name = var
             temp.append(current)
 
