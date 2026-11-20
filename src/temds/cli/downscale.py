@@ -225,6 +225,16 @@ def delta_method(
 
     if not variables:
         variables = [v for v in area.data[to_downscale].data[0].dataset.data_vars if v in climate_variables.DOWNSCALE_SAFE]
+
+    # A variable can only be downscaled if the baseline and the reference
+    # have it too (e.g. CESM2 historical has no daily tasmin/tasmax on
+    # Pangeo, but ssp245 does).
+    have_baseline = set(area.data[baseline].dataset.data_vars)
+    have_reference = set(area.data[reference].dataset.data_vars)
+    dropped = [v for v in variables if v not in have_baseline or v not in have_reference]
+    if dropped:
+        log.warn(f'Not downscaling {dropped}: missing from baseline ({baseline}) or reference ({reference}).')
+        variables = [v for v in variables if v not in dropped]
     
     log.info(f'Downscaling {variables}')
     # sys.exit()
