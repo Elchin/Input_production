@@ -1236,9 +1236,22 @@ class TEMDataset(object):
             source_y = working_dataset.y.shape[0]
 
        
-        source_gt = working_dataset.rio.transform()
-        # source_gt = source_gt.c, abs(source_gt.a), source_gt.b, source_gt.f, source_gt.d, abs(source_gt.e)
-        source_gt = source_gt.c, source_gt.a, source_gt.b, source_gt.f, source_gt.d, source_gt.e
+        # Derive the source transform from the coordinates, never from a
+        # (possibly stale) cached GeoTransform attribute. A stale cache
+        # previously shifted CMIP6 data by ~1 grid cell (see
+        # gdal_tools.transform_from_coords).
+        source_transform = gdal_tools.transform_from_coords(working_dataset)
+        try:
+            cached_transform = working_dataset.rio.transform()
+        except Exception:
+            cached_transform = source_transform
+        if not cached_transform.almost_equals(source_transform, precision=1e-6):
+            self.logger.warn(
+                f'{funcname}: cached GeoTransform {tuple(cached_transform)[:6]} '
+                f'disagrees with coordinates {tuple(source_transform)[:6]}; '
+                'using the coordinates.'
+            )
+        source_gt = source_transform.to_gdal()
         # print(source_gt)
 
         # N time steps
@@ -1850,16 +1863,24 @@ class YearlyDataset(TEMDataset):
 
             data =  xr.open_dataset(var_file)
             data = data.sel(time=slice(f'{year}-01-01', f'{year}-12-31'))
-            gt = data.rio.transform()
             ## Drop original encoding as we will redo this 
             ## to match our other data
             data = data.drop_encoding()
 
-            ## this does change lon_bnds as well, but why?
+            ## Files from `download cmip6-daily` are already -180..180; this
+            ## is a no-op for them but keeps raw 0..360 files working.
             data.coords['lon'] = (data.coords['lon'] + 180) % 360 - 180
-            data.coords['lon_bnds'] = (data.coords['lon_bnds'] + 180) % 360 - 180
+            if 'lon_bnds' in data.coords:
+                data.coords['lon_bnds'] = (data.coords['lon_bnds'] + 180) % 360 - 180
+            elif 'lon_bnds' in data:
+                data['lon_bnds'] = (data['lon_bnds'] + 180) % 360 - 180
 
             data = data.sortby(data.lon)
+            ## Any GeoTransform cached in spatial_ref describes the grid
+            ## *before* the shift/sort above (or is the identity transform
+            ## written by older downloads) and must not be reused.
+            if 'spatial_ref' in data.coords:
+                data = data.drop_vars('spatial_ref')
             
 
             ready_variables.append(data)
@@ -1918,8 +1939,10 @@ class YearlyDataset(TEMDataset):
             .rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)\
             .rio.write_coordinate_system(inplace=True)
         
-        # gt = (-180.0, 1.8617204339585491, 0.0, 83.75, 0.0, -1.8617204339523812)
-        new.dataset.rio.write_transform(gt, inplace=True)
+        # Transform from the final (shifted, sorted) coordinates.
+        new.dataset.rio.write_transform(
+            gdal_tools.transform_from_coords(new.dataset), inplace=True
+        )
 
         return new
 
