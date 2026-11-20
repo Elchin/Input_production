@@ -414,10 +414,9 @@ class TEMDataset(object):
 
         # SoilGrids 1 km layers are integer g/kg with nodata -32768. The
         # value used for TEM is the thickness weighted mean over
-        # soil_texture.DEPTHS (15-30, 30-60, 60-100 cm, i.e. 15-100 cm; the
-        # 0-5 and 5-15 cm layers are not used, as before) converted to
-        # percent (g/kg / 10). The old one-liner
-        # (v15*15 + v30*30 + v60*40) / (150 + 300 + 400) is the same thing.
+        # soil_texture.DEPTHS (0-5, 5-15, 15-30, 30-60, 60-100 cm, i.e.
+        # 0-100 cm) converted to percent (g/kg / 10). Earlier versions used
+        # only 15-100 cm: (v15*15 + v30*30 + v60*40) / (150 + 300 + 400).
         for X in ['clay','sand','silt']:
             logger.info(f'{func_name}: Processing {X} data')
 
@@ -425,7 +424,13 @@ class TEMDataset(object):
             weights = []
             srs = None
             for depth, thickness in soil_texture.DEPTHS.items():
-                src = gdal.Open(str(pathlib.Path(data_path, soil_texture.file_name(X, depth))))
+                fname = pathlib.Path(data_path, soil_texture.file_name(X, depth))
+                if not fname.exists():
+                    raise FileNotFoundError(
+                        f'{func_name}: missing SoilGrids layer {fname}. All of '
+                        f'{list(soil_texture.DEPTHS)} are needed for {X} '
+                        f'(download from {soil_texture.urlclay.rsplit("/", 2)[0]}/{X}/).')
+                src = gdal.Open(str(fname))
                 if srs is None:
                     srs = src.GetSpatialRef()
                 assert src.GetSpatialRef().IsSame(srs), "CRS mismatch"

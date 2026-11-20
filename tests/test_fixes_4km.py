@@ -14,6 +14,7 @@ fixes made after the 4 km North Slope test run (Nov 2026):
   16 integer veg_class / drainage_class storage
   18 no fixed /tmp paths in from_vegetation
 """
+import re
 import warnings
 
 import cftime
@@ -275,21 +276,52 @@ def test_depth_weighted_percent():
     assert got[0] == pytest.approx(old)
 
 
+def test_soil_depths_cover_0_to_100cm():
+    tops, bottoms = [], []
+    for depth, thickness in soil_texture.DEPTHS.items():
+        top, bottom = (int(v) for v in depth[:-2].split('-'))
+        assert bottom - top == thickness
+        tops.append(top)
+        bottoms.append(bottom)
+    assert tops[0] == 0 and bottoms[-1] == 100
+    assert tops[1:] == bottoms[:-1]          # contiguous, no gaps
+    for depth in soil_texture.DEPTHS:
+        for X in ['clay', 'sand', 'silt']:
+            assert re.match(soil_texture.FILE_REGEX, soil_texture.file_name(X, depth))
+
+
+def test_depth_weighted_percent_0_100cm():
+    # g/kg per layer 0-5, 5-15, 15-30, 30-60, 60-100 cm
+    vals = [100.0, 200.0, 300.0, 400.0, 500.0]
+    got = soil_texture.depth_weighted_percent(
+        [np.array([v]) for v in vals], list(soil_texture.DEPTHS.values()))
+    expected = (100*5 + 200*10 + 300*15 + 400*30 + 500*40) / 100 / 10
+    assert got[0] == pytest.approx(expected)
+
+
+def test_soil_texture_missing_layer(tmp_path):
+    region = ns_region()
+    with pytest.raises(FileNotFoundError, match='0-5cm'):
+        TEMDataset.from_soil_texture(tmp_path, region, tmp_path)
+
+
 def test_soil_texture_nodata_masked(tmp_path):
     region = ns_region()
     # 1 km source grid covering the region; top-left 20x20 km is nodata
     n = 200
     gt = (NS_BOX[0], 1000, 0, NS_BOX[3], 0, -1000)
     for i, X in enumerate(['clay', 'sand', 'silt']):
-        for depth in soil_texture.DEPTHS:
-            a = np.full((n, n), (i + 2) * 100, 'int16')
+        for j, depth in enumerate(soil_texture.DEPTHS):
+            # 0-5 / 5-15 cm differ from the deeper layers so a dropped layer shows
+            a = np.full((n, n), (i + 2) * 100 + (100 if j < 2 else 0), 'int16')
             a[:20, :20] = soil_texture.NODATA
             _write_tif(tmp_path / soil_texture.file_name(X, depth), a, gt,
                        nodata=soil_texture.NODATA)
     st = TEMDataset.from_soil_texture(tmp_path, region, tmp_path)
     clay = st.dataset['pct_clay'].values
     assert np.isnan(clay[:5, :5]).all()          # was -3276.8
-    assert np.nanmin(clay) == pytest.approx(20.0)
+    # clay: 300 g/kg in 0-15 cm (15 cm), 200 g/kg below (85 cm) -> 21.5 %
+    assert np.nanmin(clay) == pytest.approx((300 * 15 + 200 * 85) / 100 / 10)
     assert np.isfinite(clay[10:, 10:]).all()
 
 

@@ -41,7 +41,8 @@ def extra_tem_files(
     """
     Prepare the extra TEM inputs for a region (--use-region is required):
     synthetic FRI fire, vegetation (CMT) from TEM_Landcover_V4 + RESOLVE
-    ecoregions + geoBoundaries, and soil texture from SoilGrids.
+    ecoregions + geoBoundaries, and soil texture from SoilGrids (0-100 cm
+    thickness weighted mean of the 0-5, 5-15, 15-30, 30-60, 60-100 cm layers).
 
     DATA_PATH must contain vegetation/, mask/ and soiltexture/ laid out as
     described in the README. DESTINATION is the region directory (used to

@@ -22,18 +22,21 @@ soil_texture = "soiltexture"
 
 import numpy as np
 
-## SoilGrids layers used and their thickness (cm)
-DEPTHS = {'15-30cm': 15, '30-60cm': 30, '60-100cm': 40}
+## SoilGrids layers used and their thickness (cm). All standard layers down
+## to 100 cm (0-100 cm, total thickness 100 cm) are used. Until Nov 2026 the
+## 0-5 and 5-15 cm layers were left out (15-100 cm); including them was
+## agreed with the TEM team.
+DEPTHS = {'0-5cm': 5, '5-15cm': 10, '15-30cm': 15, '30-60cm': 30, '60-100cm': 40}
 
 ## SoilGrids nodata for the integer layers
 NODATA = -32768
 
 ## files needed from each of the urls above
-FILE_REGEX = r'^(clay|sand|silt)_(15-30|30-60|60-100)cm_mean_1000\.tif$'
+FILE_REGEX = r'^(clay|sand|silt)_(0-5|5-15|15-30|30-60|60-100)cm_mean_1000\.tif$'
 
 
 def file_name(var, depth):
-    """SoilGrids 1 km file name, e.g. clay_15-30cm_mean_1000.tif"""
+    """SoilGrids 1 km file name, e.g. clay_0-5cm_mean_1000.tif"""
     return f'{var}_{depth}_mean_1000.tif'
 
 
