@@ -381,9 +381,11 @@ class TEMDataset(object):
 
         if download:
             logger.info(f'{func_name}: Downloading data.')
-            file_tools.download_all_files(soil_texture.urlsand, data_path, overwrite)
-            file_tools.download_all_files(soil_texture.urlsilt, data_path, overwrite)
-            file_tools.download_all_files(soil_texture.urlclay, data_path, overwrite)
+            for url in (soil_texture.urlsand, soil_texture.urlsilt, soil_texture.urlclay):
+                file_tools.download_all_files(
+                    url, data_path, overwrite=overwrite,
+                    include=soil_texture.FILE_REGEX,
+                )
 
         if not region:
             raise ValueError(f'{func_name}: region is required!')
@@ -408,37 +410,50 @@ class TEMDataset(object):
                                        in_vars='pct_clay pct_sand pct_silt'.split(), 
                                        ds_time_dim=[], buffer_px=0)
 
+        # SoilGrids 1 km layers are integer g/kg with nodata -32768. The
+        # value used for TEM is the thickness weighted mean over
+        # soil_texture.DEPTHS (15-30, 30-60, 60-100 cm, i.e. 15-100 cm; the
+        # 0-5 and 5-15 cm layers are not used, as before) converted to
+        # percent (g/kg / 10). The old one-liner
+        # (v15*15 + v30*30 + v60*40) / (150 + 300 + 400) is the same thing.
         for X in ['clay','sand','silt']:
             logger.info(f'{func_name}: Processing {X} data')
 
-            ds_15_30 = gdal.Open(pathlib.Path(data_path, f'{X}_15-30cm_mean_1000.tif'))
-            ds_30_60 = gdal.Open(pathlib.Path(data_path, f'{X}_30-60cm_mean_1000.tif'))
-            ds_60_100 = gdal.Open(pathlib.Path(data_path, f'{X}_60-100cm_mean_1000.tif'))
+            layers = []
+            weights = []
+            srs = None
+            for depth, thickness in soil_texture.DEPTHS.items():
+                src = gdal.Open(str(pathlib.Path(data_path, soil_texture.file_name(X, depth))))
+                if srs is None:
+                    srs = src.GetSpatialRef()
+                assert src.GetSpatialRef().IsSame(srs), "CRS mismatch"
+                src_nodata = src.GetRasterBand(1).GetNoDataValue()
+                if src_nodata is None:
+                    src_nodata = soil_texture.NODATA
+                warpOpts = gdal.WarpOptions(
+                            format='MEM',
+                            srcSRS=srs,
+                            dstSRS=extent_raster.GetSpatialRef(),
+                            xRes=extent_raster.GetGeoTransform()[1],
+                            yRes=extent_raster.GetGeoTransform()[5],
+                            resampleAlg='average',
+                            srcNodata=src_nodata,
+                            dstNodata=np.nan,
+                            outputType=gdal.GDT_Float32,
+                            outputBounds=region.get_extent())
+                # crop down to the AOI; pixels with only nodata become NaN
+                # (they used to come out as -32768 / 10 = -3276.8)
+                layers.append(gdal.Warp("", src, options=warpOpts).ReadAsArray())
+                weights.append(thickness)
 
-            assert ds_15_30.GetSpatialRef().IsSame(ds_30_60.GetSpatialRef()), "CRS mismatch"
-            assert ds_15_30.GetSpatialRef().IsSame(ds_60_100.GetSpatialRef()), "CRS mismatch"
+            avg = soil_texture.depth_weighted_percent(layers, weights)
 
-            warpOpts = gdal.WarpOptions(
-                        format='MEM',
-                        srcSRS=ds_15_30.GetSpatialRef(), 
-                        dstSRS=extent_raster.GetSpatialRef(), 
-                        xRes=extent_raster.GetGeoTransform()[1], 
-                        yRes=extent_raster.GetGeoTransform()[5], 
-                        resampleAlg='average', 
-                        outputType=gdal.GDT_Float32, 
-                        outputBounds=region.get_extent())
-
-            # crop them all down to the AOI
-            dst_1530 = gdal.Warp("", ds_15_30, options=warpOpts)
-            dst_3060 = gdal.Warp("", ds_30_60, options=warpOpts)
-            dst_60100 = gdal.Warp("", ds_60_100, options=warpOpts)
-
-            # Find the average over the 3 depth ranges
-            avg = (dst_1530.ReadAsArray() * 15 + dst_3060.ReadAsArray() * 30 + dst_60100.ReadAsArray() * 40) / (150 + 300 + 400)
-
+            n_nan = int(np.isnan(avg).sum())
+            if n_nan:
+                logger.warn(f'{func_name}: {X}: {n_nan} pixels have no SoilGrids data (NaN)')
 
             logger.info(f'{func_name}: Assigning data to the new dataset')
-            newDS.dataset[f'pct_{X}'] = (['y','x'], avg)
+            newDS.dataset[f'pct_{X}'] = (['y','x'], avg.astype(np.float32))
 
         newDS.dataset['pct_clay'].attrs.update(units='percent')
         newDS.dataset['pct_sand'].attrs.update(units='percent')

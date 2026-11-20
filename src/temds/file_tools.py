@@ -13,8 +13,20 @@ from pathlib import Path
 
 import requests
 
-def download_all_files(url: str, output_dir: Path):
-    """Download all files from a directory listing"""
+def download_all_files(url: str, output_dir: Path, overwrite: bool = False,
+                       include: str = None):
+    """Download all files from a directory listing
+
+    Parameters
+    ----------
+    url: str
+        directory listing URL
+    output_dir: Path
+    overwrite: bool, default False
+        re-download files that already exist locally
+    include: str, optional
+        regular expression; only file names matching it are downloaded
+    """
 
     response = requests.get(url)
     response.raise_for_status()
@@ -27,6 +39,9 @@ def download_all_files(url: str, output_dir: Path):
     # best generalize for other use cases...
     file_links = [f for f in file_links if not f.startswith('/:dir_browser/')]
     file_links = [f for f in file_links if not f.startswith('https://')]
+
+    if include is not None:
+        file_links = [f for f in file_links if re.search(include, f)]
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -42,16 +57,12 @@ def download_all_files(url: str, output_dir: Path):
             file_url = url.rstrip('/') + '/' + filename
             local_file = output_path / filename
 
-            if local_file.exists():
+            if local_file.exists() and not overwrite:
                 print(f"Skipped (exists): {filename}")
                 continue
 
             print(f"Downloading: {filename}")
-            file_response = requests.get(file_url)
-            file_response.raise_for_status()
-
-            with open(local_file, 'wb') as f:
-                f.write(file_response.content)
+            download(file_url, output_path, overwrite=True)
 
 def download(url: str, location: Path, overwrite: bool=False):
     """Download file at url to location
