@@ -828,8 +828,8 @@ class TEMDataset(object):
         newDS.dataset['veg_class'] = (
             ['y','x'], ( 
                 np.reshape(
-                    ecotype['CMT_num'], (region.shape[1],region.shape[0])
-                ).astype(float) # need to figure out issue with saving int data
+                    ecotype['CMT_num'].values, (region.shape[1],region.shape[0])
+                ).astype(np.int32) # TEMDataset.save handles integer _FillValue
             )
         )
 
@@ -957,7 +957,7 @@ class TEMDataset(object):
         newDS.dataset['aspect'] = (['y','x'], aspect.ReadAsArray().astype(float))
         newDS.dataset['slope'] = (['y','x'], slope.ReadAsArray().astype(float))
         newDS.dataset['TPI'] = (['y','x'], tpi.ReadAsArray().astype(float))
-        newDS.dataset['drainage_class'] = (['y','x'], drainage_class.astype(float))
+        newDS.dataset['drainage_class'] = (['y','x'], drainage_class.astype(np.int32))
 
         newDS.dataset['elevation'].attrs.update(units='m', name='Elevation')
         newDS.dataset['aspect'].attrs.update(units='degrees', name='Aspect')
@@ -1543,8 +1543,23 @@ class TEMDataset(object):
                 'zlib': compress, 'complevel': complevel # USE COMPRESSION?
             }
         
+        int_fill_value = lookup(kwargs, 'int_fill_value', -9999)
         for _var in self.vars:
-            self.dataset[_var].rio.update_encoding(climate_enc, inplace=True)
+            if np.issubdtype(self.dataset[_var].dtype, np.integer):
+                # 1e20 does not fit integer types; use an integer fill
+                fill = self.dataset[_var].attrs.pop(
+                    '_FillValue', self.dataset[_var].encoding.get('_FillValue', int_fill_value)
+                )
+                if fill is None or (isinstance(fill, float) and not np.isfinite(fill)):
+                    fill = int_fill_value
+                self.dataset[_var].attrs.pop('missing_value', None)
+                self.dataset[_var].encoding = {
+                    '_FillValue': self.dataset[_var].dtype.type(fill),
+                    'dtype': self.dataset[_var].dtype,
+                    'zlib': compress, 'complevel': complevel,
+                }
+            else:
+                self.dataset[_var].rio.update_encoding(climate_enc, inplace=True)
             
         self.dataset.attrs.update(TEMDS_version = Version())
         self.dataset.attrs.update(extra_attrs)

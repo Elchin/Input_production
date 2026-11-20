@@ -45,6 +45,22 @@ class MaskBoundaryCompatibilityError(Exception):
     """
     pass
 
+def _as_int32(da, fill=-9999):
+    """Return DataArray `da` as int32 (NaN -> `fill`) with a clean encoding.
+
+    TEM expects integer run-mask, veg_class and drainage_class variables;
+    older temds versions stored them as float64.
+    """
+    values = np.asarray(da.values)
+    if not np.issubdtype(values.dtype, np.integer):
+        values = np.where(np.isfinite(values), values, fill)
+    out = da.copy(data=values.astype(np.int32))
+    out.attrs.pop('_FillValue', None)
+    out.attrs.pop('missing_value', None)
+    out.encoding = {'dtype': 'int32', '_FillValue': np.int32(fill)}
+    return out
+
+
 class Region(object):
     """
         This class represents a region to process data over. A Region has 
@@ -594,6 +610,7 @@ class Region(object):
 
             self.logger.info("Converting drainage data to TEM format...")
             D = self.data['topo'].dataset.drop(['elevation', 'TPI', 'slope', 'aspect'])
+            D['drainage_class'] = _as_int32(D['drainage_class'])
             D['Y'] = np.arange(D.sizes['y'])
             D['X'] = np.arange(D.sizes['x'])
             self.logger.info(f"Saving file to {destination / 'drainage.nc'}...")
@@ -624,6 +641,7 @@ class Region(object):
             # setup to run with TEM...
             self.logger.info("turn on mask for all valid veg class px...")
             mask.run.data = np.where(veg_ds['veg_class'] <= 0, 0, mask.run.data) 
+            mask['run'] = _as_int32(mask['run'])
 
             mask['Y'] = np.arange(mask.sizes['y'])
             mask['X'] = np.arange(mask.sizes['x'])
@@ -641,6 +659,7 @@ class Region(object):
 
             self.logger.info("Converting vegetation data to TEM format...")
             V = self.data[dataset_name].dataset
+            V['veg_class'] = _as_int32(V['veg_class'])
             V['Y'] = np.arange(V.sizes['y'])
             V['X'] = np.arange(V.sizes['x'])
             self.logger.info(f"Saving file to {destination / 'vegetation.nc'}...")
