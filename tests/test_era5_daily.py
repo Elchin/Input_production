@@ -175,3 +175,38 @@ def test_preprocess_era5_use_region_imports_to_region(tmp_path):
         assert (ds.sizes['y'], ds.sizes['x'], ds.sizes['time']) == (50, 50, 365)
         np.testing.assert_allclose(ds['tair_avg'].values, -10.0, atol=1e-4)
         np.testing.assert_allclose(ds['prec'].values, 1.0, atol=1e-4)
+
+
+# ----------------------------------------- single-year TEM climate export
+def region_daily_dataset(year=2000, value=-10.0):
+    import cftime
+    time = xr.date_range(f'{year}-01-01', periods=365, freq='D', calendar='noleap', use_cftime=True)
+    x = NS_BOX[0] + 2000 + 4000 * np.arange(50)
+    y = NS_BOX[3] - 2000 - 4000 * np.arange(50)
+    shape = (365, 50, 50)
+    ds = xr.Dataset(
+        {v: (('time', 'y', 'x'), np.full(shape, val, dtype='float32'))
+         for v, val in dict(tair_avg=value, prec=1.0, nirr=80.0, vapo=0.3).items()},
+        coords=dict(time=time, y=y, x=x))
+    for v, u in dict(tair_avg='celsius', prec='mm', nirr='W/m^2', vapo='kPa').items():
+        ds[v].attrs['units'] = u
+    ds.attrs['TEMDS_version'] = 'test'
+    ds.rio.write_crs(EASE, inplace=True)
+    return ds
+
+
+def test_export_single_year_climate(tmp_path):
+    from temds.datasources.dataset import YearlyDataset
+    from temds.datasources.timeseries import YearlyTimeSeries
+    r = ns_region()
+    r.data['era5-downscaled'] = YearlyTimeSeries([YearlyDataset(2000, region_daily_dataset())])
+    where = tmp_path / 'northslope'
+    where.mkdir()
+    assert r.export_TEM('cru_climate', where, cru_item='era5-downscaled') == 0
+    with xr.open_dataset(where / 'tem_export' / 'era5-downscaled-historic-climate.nc') as ds:
+        assert ds.sizes['time'] == 12
+        assert ds.attrs['source_data_version'] == 'test'
+        np.testing.assert_allclose(ds['tair'].values, -10.0)
+        # prec is summed: noleap month lengths
+        np.testing.assert_allclose(ds['precip'].mean(('x', 'y')).values,
+                                   [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])

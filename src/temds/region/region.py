@@ -725,8 +725,8 @@ class Region(object):
                 if 'units' not in ds_monthly[v].attrs:
                     self.logger.warn("No units for variable: ", v)
 
-            if 'TEMDS_version' in self.data[ds_key_name].data[1].dataset.attrs:
-                ds_monthly.attrs['source_data_version'] = self.data[ds_key_name].data[1].dataset.attrs['TEMDS_version']
+            if 'TEMDS_version' in self.data[ds_key_name].data[-1].dataset.attrs:
+                ds_monthly.attrs['source_data_version'] = self.data[ds_key_name].data[-1].dataset.attrs['TEMDS_version']
             else:
                 self.logger.warn("No TEMDS_version attr in source data, cannot set source_data_version attr in output TEM dataset.")
                 ds_monthly.attrs['source_data_version'] = 'unknown'
