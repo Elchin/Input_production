@@ -709,7 +709,7 @@ class Region(object):
             # Check per variable units attr presence in last yr of source data
             for v in self.data[ds_key_name].data[-1].dataset.variables:
                 if 'units' not in self.data[ds_key_name].data[-1].dataset[v].attrs:
-                    print("No units for variable: ", v)
+                    self.logger.warn(f"No units for variable: {v}")
 
             ds_monthly = self.data[ds_key_name].synthesize_to_monthly(target_vars, new_names)
 
@@ -723,7 +723,7 @@ class Region(object):
             # Check units attr presence in synthesized data
             for v in ds_monthly.data_vars:
                 if 'units' not in ds_monthly[v].attrs:
-                    self.logger.warn("No units for variable: ", v)
+                    self.logger.warn(f"No units for variable: {v}")
 
             if 'TEMDS_version' in self.data[ds_key_name].data[-1].dataset.attrs:
                 ds_monthly.attrs['source_data_version'] = self.data[ds_key_name].data[-1].dataset.attrs['TEMDS_version']

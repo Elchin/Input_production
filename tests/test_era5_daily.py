@@ -210,3 +210,15 @@ def test_export_single_year_climate(tmp_path):
         # prec is summed: noleap month lengths
         np.testing.assert_allclose(ds['precip'].mean(('x', 'y')).values,
                                    [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+
+
+def test_export_warns_on_missing_units(tmp_path):
+    from temds.datasources.dataset import YearlyDataset
+    from temds.datasources.timeseries import YearlyTimeSeries
+    ds = region_daily_dataset()
+    del ds['vapo'].attrs['units']
+    r = ns_region()
+    r.data['era5-downscaled'] = YearlyTimeSeries([YearlyDataset(2000, ds)])
+    (tmp_path / 'northslope').mkdir()
+    assert r.export_TEM('cru_climate', tmp_path / 'northslope', cru_item='era5-downscaled') == 0
+    assert any('No units for variable: vapo' in m.text for m in r.logger.data)
