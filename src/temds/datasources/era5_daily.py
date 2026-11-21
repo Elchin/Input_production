@@ -83,6 +83,45 @@ API_VARIABLES = {
 
 DEFAULT_BOUNDS = [90, -180, 30, 180]
 
+#: Default buffer (degrees) added around a region's lon/lat extent when
+#: building the CDS ``area``. 1 degree is 4 ERA5 cells, enough for the
+#: coarse cells to fully cover the region edges when warping.
+DEFAULT_BUFFER_DEGREES = 1.0
+
+ERA5_RESOLUTION = 0.25
+
+
+def bounds_from_extent(extent, buffer_degrees=DEFAULT_BUFFER_DEGREES):
+    """Convert a lon/lat extent to a CDS ``area`` request.
+
+    Parameters
+    ----------
+    extent: tuple
+        (min lon, min lat, max lon, max lat) in EPSG:4326, e.g. from
+        ``Region.get_extent(4326)``.
+    buffer_degrees: float
+        Buffer added on every side, then snapped outward to the 0.25 degree
+        ERA5 grid and clipped to valid lon/lat.
+
+    Returns
+    -------
+    list
+        [max lat, min lon, min lat, max lon] (CDS ``area`` order)
+    """
+    import math
+    minx, miny, maxx, maxy = [float(v) for v in extent]
+    res = ERA5_RESOLUTION
+    snap_dn = lambda v: math.floor(v / res) * res
+    snap_up = lambda v: math.ceil(v / res) * res
+    north = min(90.0, snap_up(maxy + buffer_degrees))
+    south = max(-90.0, snap_dn(miny - buffer_degrees))
+    west = snap_dn(minx - buffer_degrees)
+    east = snap_up(maxx + buffer_degrees)
+    if east - west >= 360 or west < -180 or east > 180:
+        # all longitudes (pole in region or antimeridian crossing)
+        west, east = -180.0, 180.0
+    return [north, west, south, east]
+
 ## REGISTER CLIMATE VARIABLES
 climate_variables.register('tair_avg', NAME, 't2m')
 

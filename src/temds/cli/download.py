@@ -37,9 +37,14 @@ NAME = 'Download'
 def ERA5_daily(
         context: Context,
         destination: common.DESTINATION_DIR,
-        years: Annotated[tuple[int, int], Argument(help="Range of years to download ERA5 daily data for.")] = None
+        years: Annotated[tuple[int, int], Argument(help="Range of years to download ERA5 daily data for.")] = None,
+        bounds: Annotated[tuple[float, float, float, float], Option(help="CDS area as NORTH WEST SOUTH EAST (degrees). Overrides the --use-region extent. Default without a region: 90 -180 30 180")] = None,
+        buffer_degrees: Annotated[float, Option(help="Buffer in degrees added around the --use-region extent (snapped outward to the 0.25 degree ERA5 grid)")] = era5_daily.DEFAULT_BUFFER_DEGREES,
     ):
-    """Downloads ERA5 daily reanalysis data from ECMWF. This is a slow process.
+    """Downloads ERA5 daily reanalysis data from ECMWF.
+
+    With --use-region only the region's lon/lat extent plus --buffer-degrees
+    is requested, which is far faster than the default 30-90N band.
     """
     log = context.obj.log
     overwrite = context.obj.overwrite
@@ -50,7 +55,20 @@ def ERA5_daily(
 
     ## always get the years aas a range. 
     years = common.years_as_range_check(years, True, [1940,2025])
-    
+
+    if bounds is not None:
+        area = [float(b) for b in bounds]
+    elif context.obj.region:
+        extent = context.obj.region.get_extent(4326)
+        area = era5_daily.bounds_from_extent(extent, buffer_degrees)
+        log.info(f'Region lon/lat extent {tuple(round(float(e), 3) for e in extent)}')
+    else:
+        area = list(era5_daily.DEFAULT_BOUNDS)
+        log.warn(
+            f'No region or --bounds given: requesting the default area {area} '
+            '(N, W, S, E). This is slow; pass --use-region or --bounds.'
+        )
+    log.info(f'CDS area (N, W, S, E): {area}')
 
     log.info(f'Processing years: {years}')
     # return
@@ -77,7 +95,8 @@ def ERA5_daily(
                 #     destination, variable, date, overwrite=False
                 # )
                 file, status = era5_daily.download_variable_for_year_month(
-                    destination, variable, year_h, month, overwrite=False
+                    destination, variable, year_h, month, bounds=area,
+                    overwrite=False
                 )
                 if status == 'skipped':
                     log.info(f'...... File exists, download skipped.')
