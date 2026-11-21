@@ -8,7 +8,7 @@ TODO:
 """
 from pathlib import Path
 
-from typer import Typer, Argument, Option, Context
+from typer import Typer, Argument, Option, Context, Exit
 from typing import Annotated
 
 import xarray as xr
@@ -65,7 +65,11 @@ def era5_daily(
     for year in years:
         log.info(f'Preprocessing year: {year}')
 
-        yearly_files = list(downloads.glob(f'*{year}*.nc'))
+        try:
+            yearly_files = datasources.era5_daily.find_yearly_files(downloads, year)
+        except FileNotFoundError as e:
+            log.error(str(e))
+            raise Exit(1)
         log.info(f'.. Files found {[f.name for f in yearly_files]}.')
 
         yearly_data = [xr.open_dataset(file) for file in yearly_files]

@@ -306,6 +306,33 @@ def download_variable_for_date(
 #     results.download(save_to)
 
 
+def yearly_file_name(variable: str, year: int) -> str:
+    """Name of the merged yearly download for a TEMDS variable, as written by
+    `download era5-daily` (e.g. '2000-2m_temperature.nc')."""
+    return f"{year}-{API_VARIABLES[variable]['name']}.nc"
+
+
+def find_yearly_files(directory: Path | str, year: int) -> list[Path]:
+    """Exact yearly download files for every variable in API_VARIABLES.
+
+    Unlike a '*{year}*.nc' glob this does not pick up monthly partials
+    ('2000-01-2m_temperature.nc'), files of other years or unrelated files.
+
+    Raises
+    ------
+    FileNotFoundError
+        Listing every missing file.
+    """
+    directory = Path(directory)
+    files = [directory / yearly_file_name(v, year) for v in API_VARIABLES]
+    missing = [f.name for f in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f'Missing ERA5 yearly download(s) for {year} in {directory}: {missing}'
+        )
+    return files
+
+
 def merge_for_year(year: int, datasets: list[xr.Dataset]):
     """Merge all variables for a given year.
 

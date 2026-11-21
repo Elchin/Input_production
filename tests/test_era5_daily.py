@@ -68,3 +68,22 @@ def test_download_passes_area_and_skips_existing(tmp_path, monkeypatch):
     assert seen['variable'] == ['total_precipitation'] and seen['daily_statistic'] == 'daily_sum'
     f, status = era5_daily.download_variable_for_year_month(tmp_path, 'prec', 2000, 1)
     assert status == 'skipped'
+
+
+# ------------------------------------------- exact preprocess file names
+def test_find_yearly_files_ignores_partials(tmp_path):
+    for v in era5_daily.API_VARIABLES:
+        (tmp_path / era5_daily.yearly_file_name(v, 2000)).write_text('x')
+    (tmp_path / '2000-01-2m_temperature.nc').write_text('partial')
+    (tmp_path / '2001-2m_temperature.nc').write_text('other year')
+    (tmp_path / 'era5_probe_2000-07-01_t2m.nc').write_text('probe')
+    files = era5_daily.find_yearly_files(tmp_path, 2000)
+    assert sorted(f.name for f in files) == sorted([
+        '2000-2m_dewpoint_temperature.nc', '2000-2m_temperature.nc',
+        '2000-surface_solar_radiation_downwards.nc', '2000-total_precipitation.nc'])
+
+
+def test_find_yearly_files_reports_missing(tmp_path):
+    (tmp_path / '2000-2m_temperature.nc').write_text('x')
+    with pytest.raises(FileNotFoundError, match='total_precipitation'):
+        era5_daily.find_yearly_files(tmp_path, 2000)
