@@ -87,3 +87,42 @@ def test_find_yearly_files_reports_missing(tmp_path):
     (tmp_path / '2000-2m_temperature.nc').write_text('x')
     with pytest.raises(FileNotFoundError, match='total_precipitation'):
         era5_daily.find_yearly_files(tmp_path, 2000)
+
+
+# --------------------------------------------------- leap-day / noleap
+def synthetic_downloads(year=2000, ny=3, nx=4):
+    time = pd.date_range(f'{year}-01-01', f'{year}-12-31', freq='D')
+    lat = np.linspace(70.5, 70.0, ny)
+    lon = np.linspace(-155, -154.25, nx)
+    shape = (len(time), ny, nx)
+    doy = np.arange(len(time))[:, None, None] * np.ones(shape)
+    coords = dict(valid_time=time, latitude=lat, longitude=lon)
+    dims = ('valid_time', 'latitude', 'longitude')
+    mk = lambda name, data: xr.Dataset({name: (dims, data)}, coords=coords)
+    return [
+        mk('t2m', 273.15 + doy),             # K -> degC == day index
+        mk('d2m', np.full(shape, 273.15)),   # 0 degC dewpoint
+        mk('ssrd', np.full(shape, 86400.0 * 100)),  # J/m2/day -> 100 W/m2
+        mk('tp', np.full(shape, 0.002)),     # m/day -> 2 mm/day
+    ]
+
+
+def test_merge_for_year_drops_feb29_and_converts_units():
+    merged = era5_daily.merge_for_year(2000, synthetic_downloads(2000))
+    ds = merged.dataset
+    assert ds.sizes['time'] == 365
+    assert ds.time.dt.calendar == 'noleap'
+    assert not ((ds.time.dt.month == 2) & (ds.time.dt.day == 29)).any()
+    # Mar 1 is day index 60 in the 366-day input (Feb 29 = 59 removed),
+    # and must be the 60th (0-based 59) step of the noleap year.
+    assert float(ds['tair_avg'].isel(time=59)[0, 0]) == pytest.approx(60.0)
+    assert float(ds['tair_avg'].isel(time=-1)[0, 0]) == pytest.approx(365.0)  # Dec 31 kept
+    np.testing.assert_allclose(ds['prec'].values, 2.0)
+    np.testing.assert_allclose(ds['nirr'].values, 100.0)
+    np.testing.assert_allclose(ds['vapo'].values, 0.61078, rtol=1e-6)
+
+
+def test_merge_for_year_non_leap_unchanged():
+    ds = era5_daily.merge_for_year(2001, synthetic_downloads(2001)).dataset
+    assert ds.sizes['time'] == 365
+    assert float(ds['tair_avg'].isel(time=-1)[0, 0]) == pytest.approx(364.0)

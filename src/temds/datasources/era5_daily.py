@@ -366,6 +366,11 @@ def merge_for_year(year: int, datasets: list[xr.Dataset]):
     rename_dict = climate_variables.aliases_for(source, 'dict_r')
     rename_dict.update({'longitude':'lon', 'latitude':'lat', 'valid_time':'time'})
     merged = merged.rename(rename_dict)
+
+    # Downscaling, baselines and TEM export assume 365-day years
+    # (constants.MONTH_START_DAYS). Keeping Feb 29 shifted every month
+    # after February by one day and dropped Dec 31 in leap years.
+    merged = merged.convert_calendar('noleap', dim='time')
     
     d2m = merged['dewpoint']
     merged['vapo'] = calculate_vapo_from_dewpoint(d2m)
