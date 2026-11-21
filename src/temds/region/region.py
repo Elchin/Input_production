@@ -503,6 +503,11 @@ class Region(object):
             'cmip_item': str, defaults 'cmip6-ssp245-downscaled'
                 region item exported as `cmip_climate`
                 (to {cmip_item}-projected-climate.nc)
+            'era5_item': str, defaults 'era5-downscaled'
+                region item exported as `era5_climate`
+                (to {era5_item}-historic-climate.nc). ERA5 provides
+                tair_avg, prec, nirr and vapo only, which is all the TEM
+                climate files contain.
 
         Questions:
          - should this export all data in a region object? Not all possible keys
@@ -530,6 +535,7 @@ class Region(object):
         source_directory = Path(kwargs.get('source_directory') or where)
         cru_item = kwargs.get('cru_item') or 'crujra-downscaled'
         cmip_item = kwargs.get('cmip_item') or 'cmip6-ssp245-downscaled'
+        era5_item = kwargs.get('era5_item') or 'era5-downscaled'
         if self.name != Path(where).name:
             self.logger.warn(
                 f"{function_name}: region name {self.name} differs from "
@@ -683,10 +689,12 @@ class Region(object):
             ST.to_netcdf(destination / 'soil-texture.nc')
             return 0
 
-        if dataset_name == 'cru_climate' or dataset_name == 'cmip_climate':
+        if dataset_name in ('cru_climate', 'era5_climate', 'cmip_climate'):
 
             if dataset_name == 'cru_climate':
                 ds_key_name = cru_item
+            if dataset_name == 'era5_climate':
+                ds_key_name = era5_item
             if dataset_name == 'cmip_climate':
                 ds_key_name = cmip_item
             if ds_key_name not in self.data.keys():
@@ -767,6 +775,8 @@ class Region(object):
 
             if dataset_name == 'cru_climate':
                 outname = f'{cru_item}-historic-climate.nc'
+            elif dataset_name == 'era5_climate':
+                outname = f'{era5_item}-historic-climate.nc'
             elif dataset_name == 'cmip_climate':
                 outname = f'{cmip_item}-projected-climate.nc'
             else:

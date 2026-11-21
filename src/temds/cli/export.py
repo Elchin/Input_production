@@ -32,6 +32,7 @@ def export_model(
         from_directory: Annotated[pathlib.Path, Option(help="Directory to read data from. Will default to region directory if --use-region is provided")] = None,
         cmip_item: Annotated[str, Option(help="Region item exported as cmip_climate (written to <item>-projected-climate.nc)")] = 'cmip6-ssp245-downscaled',
         cru_item: Annotated[str, Option(help="Region item exported as cru_climate (written to <item>-historic-climate.nc)")] = 'crujra-downscaled',
+        era5_item: Annotated[str, Option(help="Region item exported as era5_climate (written to <item>-historic-climate.nc). Not part of --which all")] = 'era5-downscaled',
     ):
     """This command exports data to a model specific format"""
     log = context.obj.log
@@ -53,7 +54,7 @@ def export_model(
 
     if which == 'all':
         log.info("Exporting all datasets...")
-        dataset_list = temds.constants.TEMDS_DATASET_NAMES
+        dataset_list = temds.constants.TEMDS_DEFAULT_EXPORT_NAMES
     else:
         dataset_list = [name.strip() for name in which.split(',')]
         invalid = [name for name in dataset_list if name not in temds.constants.TEMDS_DATASET_NAMES]
@@ -66,7 +67,7 @@ def export_model(
         ret_code = r.export_TEM(
             dataset_name=dataset_name, where=destination,
             source_directory=source_directory,
-            cmip_item=cmip_item, cru_item=cru_item,
+            cmip_item=cmip_item, cru_item=cru_item, era5_item=era5_item,
         )
         if ret_code:
             log.error(f"Failed to export dataset: {dataset_name}")

@@ -88,7 +88,29 @@ TEMdownscale --use-region $R --no-load-all export --format TEM --which runmask,d
 With `--use-region`, the DESTINATION of `preprocess cmip6-daily` and
 `downscale delta-method` is the region item name. `export` writes
 `<item>-projected-climate.nc` / `<item>-historic-climate.nc` for
-`cmip_climate` / `cru_climate` (`--cmip-item`, `--cru-item`).
+`cmip_climate` / `cru_climate` / `era5_climate` (`--cmip-item`, `--cru-item`,
+`--era5-item`). `era5_climate` is an alternative historic climate and is only
+exported when named in `--which`.
+
+ERA5 (needs a CDS account, the accepted dataset licence and a token in
+`~/.ecmwfdatastoresrc` or `$ECMWF_DATASTORES_RC_FILE`):
+
+```
+TEMdownscale --use-region $R --no-load-all --parallel download era5-daily downloads/era5 2000 2000
+TEMdownscale --use-region $R --no-load-all preprocess era5-daily downloads/era5_pre downloads/era5 2000 2000
+TEMdownscale --use-region $R --no-load-all --load-item era5 --load-item worldclim \
+  downscale delta-method era5-downscaled era5 worldclim --baseline-years 2000 2000 --baseline-name era5-baseline
+TEMdownscale --use-region $R --no-load-all export --format TEM --which era5_climate $R
+```
+
+With `--use-region` the download requests only the region's lon/lat extent
+plus `--buffer-degrees` (default 1), and preprocess writes the region item
+`era5` (calendar converted to noleap: Feb 29 is dropped). ERA5 provides
+`tair_avg`, `prec`, `nirr` and `vapo` (from dewpoint) only, which is all the
+TEM climate files use. `tair_min`/`tair_max` (2 m temperature
+`daily_minimum`/`daily_maximum`) and `wind` (10 m u/v) are not derived from
+dewpoint or the other downloads and would need extra CDS requests; they are
+not downloaded.
 
 ## Downscaling method
 
@@ -159,8 +181,8 @@ Branch `temds-fixes-4km-test` (Nov 2026, from the North Slope 4 km test run):
   download (regions fully on one side, or containing the pole, are).
 - CESM2 historical has no daily tasmin/tasmax on Pangeo, so tair_min/tair_max
   are not produced for it.
-- CRU-JRA (CEDA) and ERA5 (CDS) paths need credentials and were not part of
-  the 4 km test.
+- CRU-JRA (CEDA) needs credentials and was not part of the 4 km test. The
+  ERA5 (CDS) path was tested for 2000 on the same region.
 - Fire return interval (`fri-fire.nc`) is synthetic.
 
 ## Use

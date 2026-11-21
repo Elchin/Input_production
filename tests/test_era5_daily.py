@@ -247,3 +247,19 @@ def test_export_tem_unit_labels(tmp_path):
     with xr.open_dataset(tmp_path / 'northslope/tem_export/era5-downscaled-historic-climate.nc') as out:
         assert {v: out[v].attrs['units'] for v in ['tair', 'precip', 'nirr', 'vapor_press']} == \
             {'tair': 'celsius', 'precip': 'mm/month', 'nirr': 'W/m^2', 'vapor_press': 'kPa'}
+
+
+# ---------------------------------------------------- era5_climate export
+def test_export_era5_climate_option(tmp_path):
+    from temds.constants import TEMDS_DATASET_NAMES, TEMDS_DEFAULT_EXPORT_NAMES
+    from temds.datasources.dataset import YearlyDataset
+    from temds.datasources.timeseries import YearlyTimeSeries
+    assert 'era5_climate' in TEMDS_DATASET_NAMES
+    assert 'era5_climate' not in TEMDS_DEFAULT_EXPORT_NAMES
+    r = ns_region()
+    r.data['era5-test'] = YearlyTimeSeries([YearlyDataset(2000, region_daily_dataset(value=-5.0))])
+    (tmp_path / 'northslope').mkdir()
+    assert r.export_TEM('era5_climate', tmp_path / 'northslope', era5_item='era5-test') == 0
+    with xr.open_dataset(tmp_path / 'northslope/tem_export/era5-test-historic-climate.nc') as ds:
+        assert ds.attrs['dataset_name'] == 'era5_climate'
+        np.testing.assert_allclose(ds['tair'].values, -5.0)
