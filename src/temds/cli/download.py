@@ -51,7 +51,7 @@ def ERA5_daily(
     cleanup = context.obj.cleanup
     # parallel = context.obj.parallel
     # n_process = context.obj.n_process
-    log.info('Starting download of cmip6-daily data.')
+    log.info('Starting download of ERA5-daily data.')
 
     ## always get the years aas a range. 
     years = common.years_as_range_check(years, True, [1940,2025])
