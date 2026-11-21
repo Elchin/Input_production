@@ -126,3 +126,52 @@ def test_merge_for_year_non_leap_unchanged():
     ds = era5_daily.merge_for_year(2001, synthetic_downloads(2001)).dataset
     assert ds.sizes['time'] == 365
     assert float(ds['tair_avg'].isel(time=-1)[0, 0]) == pytest.approx(364.0)
+
+
+# ------------------------------------- preprocess era5-daily --use-region
+def write_synthetic_downloads(where, year=2000):
+    """Yearly files on a 0.25 deg grid covering the North Slope box + buffer"""
+    time = pd.date_range(f'{year}-01-01', f'{year}-12-31', freq='D')
+    lat = np.arange(71.75, 67.25 - 0.01, -0.25)
+    lon = np.arange(-157.75, -149.0 + 0.01, 0.25)
+    shape = (len(time), len(lat), len(lon))
+    coords = dict(valid_time=time, latitude=lat, longitude=lon)
+    dims = ('valid_time', 'latitude', 'longitude')
+    doy = np.arange(len(time))[:, None, None] * np.ones(shape)
+    values = {'t2m': 263.15 + 0 * doy, 'd2m': np.full(shape, 260.0),
+              'ssrd': np.full(shape, 86400.0 * 50), 'tp': np.full(shape, 0.001)}
+    names = {'t2m': 'tair_avg', 'd2m': 'dewpoint', 'ssrd': 'nirr', 'tp': 'prec'}
+    for src, std in names.items():
+        xr.Dataset({src: (dims, values[src].astype('float32'))}, coords=coords)\
+            .to_netcdf(where / era5_daily.yearly_file_name(std, year))
+
+
+def test_preprocess_era5_use_region_imports_to_region(tmp_path):
+    from typer.testing import CliRunner
+    from temds.cli.main import app
+    import yaml
+
+    bnd = tmp_path / 'boundary.geojson'
+    gpd.GeoDataFrame(geometry=[shapely.box(*NS_BOX)], crs=EASE).to_file(bnd)
+    region_dir = tmp_path / 'northslope'
+    runner = CliRunner()
+    res = runner.invoke(app, ['region', 'create', str(region_dir), str(bnd), '--resolution', '4000'])
+    assert res.exit_code == 0, res.output
+
+    downloads = tmp_path / 'downloads'
+    downloads.mkdir()
+    write_synthetic_downloads(downloads)
+    res = runner.invoke(app, [
+        '--use-region', str(region_dir), '--no-load-all',
+        'preprocess', 'era5-daily', str(tmp_path / 'unused'), str(downloads), '2000', '2000'])
+    assert res.exit_code == 0, res.output
+
+    assert not (region_dir / 'ERA5-').exists()
+    out = region_dir / 'era5' / 'era5-2000.nc'
+    assert out.exists()
+    manifest = yaml.safe_load((region_dir / 'manifest.yml').read_text())
+    assert 'era5' in manifest['data']
+    with xr.open_dataset(out) as ds:
+        assert (ds.sizes['y'], ds.sizes['x'], ds.sizes['time']) == (50, 50, 365)
+        np.testing.assert_allclose(ds['tair_avg'].values, -10.0, atol=1e-4)
+        np.testing.assert_allclose(ds['prec'].values, 1.0, atol=1e-4)

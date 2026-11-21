@@ -34,7 +34,8 @@ def era5_daily(
         context: Context,
         destination: common.DESTINATION_DIR,
         source: common.SOURCE_DIR,
-        years: Annotated[tuple[int, int], Argument(help="Range of years to preprocess ERA5 daily data for.")] = None
+        years: Annotated[tuple[int, int], Argument(help="Range of years to preprocess ERA5 daily data for.")] = None,
+        name: Annotated[str, Option(help="Region item name used with --use-region")] = 'era5',
         # years: common.ERA5_YEARS = None,
         # years_as_range: common.YEAR_RANGE_FLAG = False,
         # overwrite: common.OVERWRITE_FLAG = True,
@@ -42,16 +43,29 @@ def era5_daily(
     ):
     """This command preprocesses downloaded ERA5 daily data. Preprocessed data 
     will be formatted to be read as a YearlyDataset.
+
+    With --use-region the merged data are warped to the region grid and
+    saved as the region item NAME (default 'era5', i.e.
+    <region>/era5/era5-<year>.nc) and added to the manifest, like
+    `region import-data`; DESTINATION is not used.
     """
     log = context.obj.log
     overwrite = context.obj.overwrite
     cleanup = context.obj.cleanup
+    parallel = context.obj.parallel
+    n_process = context.obj.get_n_process()
     log.info('Starting preprocessing of ERA5-daily data')
 
-
-    if context.obj.region: ## TODO suport region in this function
-        destination = context.obj.region_directory / 'ERA5-'
-
+    region_data = None
+    if context.obj.region:
+        region_item = context.obj.region_directory / name
+        if Path(destination).resolve() != region_item.resolve():
+            log.info(
+                f'--use-region: output goes to {region_item}; '
+                f'DESTINATION ({destination}) is not used.'
+            )
+        destination = region_item
+        region_data = []
 
     if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
@@ -76,14 +90,27 @@ def era5_daily(
         log.info(f'.. Merging')
         merged = datasources.era5_daily.merge_for_year(year, yearly_data)
 
-        save_to = destination/f'daily-ERA5-{year}.nc'
-        log.info(f'.. Saving to {save_to}.')
-        merged.save(save_to, overwrite=overwrite)
+        if region_data is not None:
+            merged.dataset.load()
+            region_data.append(merged)
+        else:
+            save_to = destination/f'daily-ERA5-{year}.nc'
+            log.info(f'.. Saving to {save_to}.')
+            merged.save(save_to, overwrite=overwrite)
 
         [ds.close() for ds in yearly_data]
         if cleanup:
             log.info(f'.. Cleanup. removing {[f.name for f in yearly_files]}.')
             [file.unlink(file) for file in yearly_files]
+
+    if region_data is not None:
+        area = context.obj.region
+        data = datasources.timeseries.YearlyTimeSeries(region_data)
+        log.info(f'Importing ERA5 to region {area.name} as {name}')
+        with parallel_config(backend="loky", n_jobs=n_process, verbose=1):
+            area.import_datasource(name, data, parallel=parallel)
+        with parallel_config(backend="loky", n_jobs=n_process, verbose=1):
+            context.obj.callback_export_region([name], parallel=parallel)
     log.info('Complete!')
 
 @app.command()
