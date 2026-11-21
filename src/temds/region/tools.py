@@ -4,6 +4,7 @@ Tools
 
 Tools for region creation and manipulation
 """
+import numbers
 import numpy as np
 import geopandas as gpd
 from pathlib import Path
@@ -14,25 +15,30 @@ from osgeo import ogr, osr, gdal
 from ..logger import Logger
 
 
-def align_to_resolution(vector: gpd.GeoSeries | gpd.GeoDataFrame, resolution: float | int) -> gpd.GeoSeries:
+def align_to_resolution(vector: gpd.GeoSeries | gpd.GeoDataFrame, resolution: float | int | tuple) -> gpd.GeoSeries:
     """Align the first feature in a GeoSeries to a resolution
 
     Parameters
     ----------
     vector: gpd.GeoSeries | gpd.GeoDataFrame
         vector dataset with on feature
-    resolution:
-        crs grid unit resolution to align bounds to
+    resolution: number or (x_res, y_res)
+        crs grid unit resolution to align bounds to. Signs are ignored, so
+        a GDAL style (x_res, -y_res) pair is accepted.
 
     Returns
     -------
     gpd.GeoSeries
     """
+    if isinstance(resolution, numbers.Real):
+        x_res = y_res = abs(resolution)
+    else:
+        x_res, y_res = (abs(r) for r in resolution)
     minx, miny, maxx, maxy = vector.bounds.iloc[0]
-    minx = resolution * np.floor(minx/resolution).astype(int)
-    miny = resolution * np.floor(miny/resolution).astype(int)
-    maxx = resolution * np.ceil(maxx/resolution).astype(int)
-    maxy = resolution * np.ceil(maxy/resolution).astype(int)
+    minx = x_res * np.floor(minx/x_res).astype(int)
+    miny = y_res * np.floor(miny/y_res).astype(int)
+    maxx = x_res * np.ceil(maxx/x_res).astype(int)
+    maxy = y_res * np.ceil(maxy/y_res).astype(int)
     aligned =  gpd.GeoSeries(shapely.box(minx, miny, maxx, maxy ), [0], vector.crs)
     return aligned
 

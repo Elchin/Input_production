@@ -6,6 +6,8 @@ Objects to manage data for TEMDS project
 
 """
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from copy import deepcopy
 import operator
@@ -381,9 +383,11 @@ class TEMDataset(object):
 
         if download:
             logger.info(f'{func_name}: Downloading data.')
-            file_tools.download_all_files(soil_texture.urlsand, data_path, overwrite)
-            file_tools.download_all_files(soil_texture.urlsilt, data_path, overwrite)
-            file_tools.download_all_files(soil_texture.urlclay, data_path, overwrite)
+            for url in (soil_texture.urlsand, soil_texture.urlsilt, soil_texture.urlclay):
+                file_tools.download_all_files(
+                    url, data_path, overwrite=overwrite,
+                    include=soil_texture.FILE_REGEX,
+                )
 
         if not region:
             raise ValueError(f'{func_name}: region is required!')
@@ -408,37 +412,55 @@ class TEMDataset(object):
                                        in_vars='pct_clay pct_sand pct_silt'.split(), 
                                        ds_time_dim=[], buffer_px=0)
 
+        # SoilGrids 1 km layers are integer g/kg with nodata -32768. The
+        # value used for TEM is the thickness weighted mean over
+        # soil_texture.DEPTHS (0-5, 5-15, 15-30, 30-60, 60-100 cm, i.e.
+        # 0-100 cm) converted to percent (g/kg / 10). Earlier versions used
+        # only 15-100 cm: (v15*15 + v30*30 + v60*40) / (150 + 300 + 400).
         for X in ['clay','sand','silt']:
             logger.info(f'{func_name}: Processing {X} data')
 
-            ds_15_30 = gdal.Open(pathlib.Path(data_path, f'{X}_15-30cm_mean_1000.tif'))
-            ds_30_60 = gdal.Open(pathlib.Path(data_path, f'{X}_30-60cm_mean_1000.tif'))
-            ds_60_100 = gdal.Open(pathlib.Path(data_path, f'{X}_60-100cm_mean_1000.tif'))
+            layers = []
+            weights = []
+            srs = None
+            for depth, thickness in soil_texture.DEPTHS.items():
+                fname = pathlib.Path(data_path, soil_texture.file_name(X, depth))
+                if not fname.exists():
+                    raise FileNotFoundError(
+                        f'{func_name}: missing SoilGrids layer {fname}. All of '
+                        f'{list(soil_texture.DEPTHS)} are needed for {X} '
+                        f'(download from {soil_texture.urlclay.rsplit("/", 2)[0]}/{X}/).')
+                src = gdal.Open(str(fname))
+                if srs is None:
+                    srs = src.GetSpatialRef()
+                assert src.GetSpatialRef().IsSame(srs), "CRS mismatch"
+                src_nodata = src.GetRasterBand(1).GetNoDataValue()
+                if src_nodata is None:
+                    src_nodata = soil_texture.NODATA
+                warpOpts = gdal.WarpOptions(
+                            format='MEM',
+                            srcSRS=srs,
+                            dstSRS=extent_raster.GetSpatialRef(),
+                            xRes=extent_raster.GetGeoTransform()[1],
+                            yRes=extent_raster.GetGeoTransform()[5],
+                            resampleAlg='average',
+                            srcNodata=src_nodata,
+                            dstNodata=np.nan,
+                            outputType=gdal.GDT_Float32,
+                            outputBounds=region.get_extent())
+                # crop down to the AOI; pixels with only nodata become NaN
+                # (they used to come out as -32768 / 10 = -3276.8)
+                layers.append(gdal.Warp("", src, options=warpOpts).ReadAsArray())
+                weights.append(thickness)
 
-            assert ds_15_30.GetSpatialRef().IsSame(ds_30_60.GetSpatialRef()), "CRS mismatch"
-            assert ds_15_30.GetSpatialRef().IsSame(ds_60_100.GetSpatialRef()), "CRS mismatch"
+            avg = soil_texture.depth_weighted_percent(layers, weights)
 
-            warpOpts = gdal.WarpOptions(
-                        format='MEM',
-                        srcSRS=ds_15_30.GetSpatialRef(), 
-                        dstSRS=extent_raster.GetSpatialRef(), 
-                        xRes=extent_raster.GetGeoTransform()[1], 
-                        yRes=extent_raster.GetGeoTransform()[5], 
-                        resampleAlg='average', 
-                        outputType=gdal.GDT_Float32, 
-                        outputBounds=region.get_extent())
-
-            # crop them all down to the AOI
-            dst_1530 = gdal.Warp("", ds_15_30, options=warpOpts)
-            dst_3060 = gdal.Warp("", ds_30_60, options=warpOpts)
-            dst_60100 = gdal.Warp("", ds_60_100, options=warpOpts)
-
-            # Find the average over the 3 depth ranges
-            avg = (dst_1530.ReadAsArray() * 15 + dst_3060.ReadAsArray() * 30 + dst_60100.ReadAsArray() * 40) / (150 + 300 + 400)
-
+            n_nan = int(np.isnan(avg).sum())
+            if n_nan:
+                logger.warn(f'{func_name}: {X}: {n_nan} pixels have no SoilGrids data (NaN)')
 
             logger.info(f'{func_name}: Assigning data to the new dataset')
-            newDS.dataset[f'pct_{X}'] = (['y','x'], avg)
+            newDS.dataset[f'pct_{X}'] = (['y','x'], avg.astype(np.float32))
 
         newDS.dataset['pct_clay'].attrs.update(units='percent')
         newDS.dataset['pct_sand'].attrs.update(units='percent')
@@ -517,17 +539,21 @@ class TEMDataset(object):
                 logger.info(f'{f2}: Writing {raster_fpath}')
                 out.write_band(1, burned)
 
+        # Per-call scratch directory (these used to be fixed paths in /tmp,
+        # so two concurrent runs on one node clobbered each other).
+        tmp_dir = Path(tempfile.mkdtemp(prefix='temds_veg_'))
+        logger.debug(f'{func_name}: scratch directory {tmp_dir}')
+        tmp = lambda n: str(tmp_dir / n)
         files = [
-            '/tmp/country_raster_temp_from_veg.tif',
-            '/tmp/state_raster_temp_from_veg.tif',
-            '/tmp/eco_raster_temp_from_veg.tif',
-            '/tmp/biome_raster_temp_from_veg.tif',
-            '/tmp/ecobiome_raster_temp_from_veg.tif',
-            '/tmp/realm_raster_temp_from_veg.tif',
-            '/tmp/TEM_Landcover_V4_temp_from_veg.tif',
-            '/tmp/drainage_raster_temp_from_veg.tif',
+            tmp('country_raster_temp_from_veg.tif'),
+            tmp('state_raster_temp_from_veg.tif'),
+            tmp('eco_raster_temp_from_veg.tif'),
+            tmp('biome_raster_temp_from_veg.tif'),
+            tmp('ecobiome_raster_temp_from_veg.tif'),
+            tmp('realm_raster_temp_from_veg.tif'),
+            tmp('TEM_Landcover_V4_temp_from_veg.tif'),
+            tmp('drainage_raster_temp_from_veg.tif'),
         ]
-        [os.unlink(f) for f in files if os.path.exists(f)]
 
         # meta = ER.meta.copy()
         meta = {
@@ -543,12 +569,12 @@ class TEMDataset(object):
         }
 
         # meta.update(compress='lzw')
-        burn_gdf('/tmp/country_raster_temp_from_veg.tif', country_geo_df, 'ctry_idx', meta)
-        burn_gdf('/tmp/state_raster_temp_from_veg.tif', state_geo_df, 'state_idx', meta)
-        burn_gdf('/tmp/eco_raster_temp_from_veg.tif', eco_geo_df, 'eco_idx', meta)
-        burn_gdf('/tmp/biome_raster_temp_from_veg.tif', biome_geo_df, 'biome_idx', meta)
-        burn_gdf('/tmp/ecobiome_raster_temp_from_veg.tif', ecobiome_geo_df, 'ecobiome_idx', meta)
-        burn_gdf('/tmp/realm_raster_temp_from_veg.tif', realm_geo_df, 'realm_idx', meta)
+        burn_gdf(tmp('country_raster_temp_from_veg.tif'), country_geo_df, 'ctry_idx', meta)
+        burn_gdf(tmp('state_raster_temp_from_veg.tif'), state_geo_df, 'state_idx', meta)
+        burn_gdf(tmp('eco_raster_temp_from_veg.tif'), eco_geo_df, 'eco_idx', meta)
+        burn_gdf(tmp('biome_raster_temp_from_veg.tif'), biome_geo_df, 'biome_idx', meta)
+        burn_gdf(tmp('ecobiome_raster_temp_from_veg.tif'), ecobiome_geo_df, 'ecobiome_idx', meta)
+        burn_gdf(tmp('realm_raster_temp_from_veg.tif'), realm_geo_df, 'realm_idx', meta)
 
         extent_raster = region.empty_gdal_dataset()
         logger.info(f"{func_name}: Convert the TEM_Landcover_V4 to match the  AOI raster in extents and resolution")
@@ -560,7 +586,7 @@ class TEMDataset(object):
             ))
         extent_raster.FlushCache()
         driver = gdal.GetDriverByName('GTiff')
-        driver.CreateCopy("/tmp/TEM_Landcover_V4_temp_from_veg.tif",extent_raster)
+        driver.CreateCopy(tmp('TEM_Landcover_V4_temp_from_veg.tif'), extent_raster)
         del(driver)
 
         if 'topo' in region.data:
@@ -573,7 +599,7 @@ class TEMDataset(object):
                 raise RuntimeError(f"{func_name}: Problem loading topo data from {destination}. Expection: {e}")
 
         # Make sure we only write out the variable we are interested in.
-        topo.dataset['drainage_class'].astype(np.int32).rio.to_raster("/tmp/drainage_raster_temp_from_veg.tif")
+        topo.dataset['drainage_class'].astype(np.int32).rio.to_raster(tmp('drainage_raster_temp_from_veg.tif'))
 
         index_names = ['ctry_idx', 'state_idx', 'eco_idx', 'biome_idx', 'ecobiome_idx', 'realm_idx', 'lc_idx', 'drain_idx']
         
@@ -591,7 +617,10 @@ class TEMDataset(object):
         
         # This is a table with one row per pixel and columns for each index.
         logger.info(f"{func_name}: Creating the ecotype table by concatening all the indices...")
-        ecotype = pd.concat(list(generate_indices(files, index_names)), axis=1)
+        try:
+            ecotype = pd.concat(list(generate_indices(files, index_names)), axis=1)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         
         logger.info(f"{func_name}: Loading the land cover classification...")
         classif = pd.read_csv(land_cover_classes)
@@ -663,21 +692,18 @@ class TEMDataset(object):
 
         # Add an alpine column
         ecotype['alpine'] = 'N/A'
-        alpine_idx = ( ecotype['ECO_NAME'].str.contains('alpine', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('montane', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('mountain', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('mountains', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('range', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('rockies', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('cordillera', case=False) | \
-                       ecotype['ECO_NAME'].str.contains('rock', case=False) )
-        ecotype['alpine'] = np.where(alpine_idx, 1, 0)
+        alpine_idx = ecotype['ECO_NAME'].fillna('').str.contains(
+            'alpine|montane|mountain|range|rockies|cordillera|rock', case=False
+        )
+        # NOTE: the CMT rules below compare against the string 'alpine'; this
+        # used to be set to 1/0, so CMT20/CMT21 could never be assigned.
+        ecotype['alpine'] = np.where(alpine_idx, 'alpine', 'N/A')
 
         # add a community column
-        ecotype['community '] = 'N/A'
+        ecotype['community'] = 'N/A'
 
         idx = ( (ecotype['classname'] == 'White Spruce forest') )
-        ecotype['community'] = np.where(idx, 'white spruce forest', ecotype['community '])
+        ecotype['community'] = np.where(idx, 'white spruce forest', ecotype['community'])
 
         idx = ( (ecotype['classname'] == 'Black Spruce forest') | \
                 (ecotype['classname'] == 'Spruce forest') | \
@@ -781,6 +807,23 @@ class TEMDataset(object):
 
         ecotype['CMT_num'] = pd.to_numeric(ecotype['CMT'].str.extract('(\d+)', expand=False)).fillna(np.int32(-9999)).astype(np.int32)
 
+        # Report land cover classes that fall through to CMT00. Unclassified,
+        # Developed, Snow/Ice and Other are intentionally CMT00 (not run by
+        # TEM); anything else (e.g. 'Cedar forest', value 22 in
+        # TEM_Landcover_V4) has no community rule and needs a decision.
+        # TODO(known issue): Cedar forest stays CMT00 + warning for now
+        # (agreed Nov 2026); see vegetation.NON_VEGETATED_CLASSES and README.
+        non_veg = temds.datasources.vegetation.NON_VEGETATED_CLASSES
+        unmapped = ecotype[(ecotype['CMT'] == 'CMT00') & (~ecotype['classname'].isin(non_veg))]
+        if len(unmapped) > 0:
+            counts = unmapped['classname'].value_counts().to_dict()
+            logger.warn(
+                f'{func_name}: land cover classes without a CMT rule were set '
+                f'to CMT00 (pixels): {counts}'
+            )
+        summary = ecotype['CMT'].value_counts(normalize=True).round(4).to_dict()
+        logger.info(f'{func_name}: CMT fractions: {summary}')
+
         logger.info(f'{func_name}: Creating empty xarray dataset')
         newDS = TEMDataset.from_region(region, 
                                               in_vars=['veg_class'], 
@@ -792,8 +835,8 @@ class TEMDataset(object):
         newDS.dataset['veg_class'] = (
             ['y','x'], ( 
                 np.reshape(
-                    ecotype['CMT_num'], (region.shape[1],region.shape[0])
-                ).astype(float) # need to figure out issue with saving int data
+                    ecotype['CMT_num'].values, (region.shape[1],region.shape[0])
+                ).astype(np.int32) # TEMDataset.save handles integer _FillValue
             )
         )
 
@@ -921,7 +964,7 @@ class TEMDataset(object):
         newDS.dataset['aspect'] = (['y','x'], aspect.ReadAsArray().astype(float))
         newDS.dataset['slope'] = (['y','x'], slope.ReadAsArray().astype(float))
         newDS.dataset['TPI'] = (['y','x'], tpi.ReadAsArray().astype(float))
-        newDS.dataset['drainage_class'] = (['y','x'], drainage_class.astype(float))
+        newDS.dataset['drainage_class'] = (['y','x'], drainage_class.astype(np.int32))
 
         newDS.dataset['elevation'].attrs.update(units='m', name='Elevation')
         newDS.dataset['aspect'].attrs.update(units='degrees', name='Aspect')
@@ -1040,7 +1083,8 @@ class TEMDataset(object):
                 name = worldclim.name_for(
                     var, version, resolution, month
                 )
-                data_raster = Path(in_dir, f'{name}.tif')
+                # str join: in_dir may be a GDAL /vsizip/ path
+                data_raster = f'{in_dir}/{name}.tif'
                 
                 logger.debug((
                     f'{func_name}: loading {var} data from {data_raster} for '
@@ -1236,9 +1280,22 @@ class TEMDataset(object):
             source_y = working_dataset.y.shape[0]
 
        
-        source_gt = working_dataset.rio.transform()
-        # source_gt = source_gt.c, abs(source_gt.a), source_gt.b, source_gt.f, source_gt.d, abs(source_gt.e)
-        source_gt = source_gt.c, source_gt.a, source_gt.b, source_gt.f, source_gt.d, source_gt.e
+        # Derive the source transform from the coordinates, never from a
+        # (possibly stale) cached GeoTransform attribute. A stale cache
+        # previously shifted CMIP6 data by ~1 grid cell (see
+        # gdal_tools.transform_from_coords).
+        source_transform = gdal_tools.transform_from_coords(working_dataset)
+        try:
+            cached_transform = working_dataset.rio.transform()
+        except Exception:
+            cached_transform = source_transform
+        if not cached_transform.almost_equals(source_transform, precision=1e-6):
+            self.logger.warn(
+                f'{funcname}: cached GeoTransform {tuple(cached_transform)[:6]} '
+                f'disagrees with coordinates {tuple(source_transform)[:6]}; '
+                'using the coordinates.'
+            )
+        source_gt = source_transform.to_gdal()
         # print(source_gt)
 
         # N time steps
@@ -1261,8 +1318,6 @@ class TEMDataset(object):
         dest = gdal_tools.empty_dataset(
             dest_x, dest_y, dest_crs, dest_gt, n_ts, gdal_type
         )
-        driver = gdal.GetDriverByName('GTiff')
-        driver.CreateCopy('sample-dest.tif', dest)
 
         source_crs = working_dataset.rio.crs.to_wkt()
         source = gdal_tools.empty_dataset(
@@ -1495,8 +1550,23 @@ class TEMDataset(object):
                 'zlib': compress, 'complevel': complevel # USE COMPRESSION?
             }
         
+        int_fill_value = lookup(kwargs, 'int_fill_value', -9999)
         for _var in self.vars:
-            self.dataset[_var].rio.update_encoding(climate_enc, inplace=True)
+            if np.issubdtype(self.dataset[_var].dtype, np.integer):
+                # 1e20 does not fit integer types; use an integer fill
+                fill = self.dataset[_var].attrs.pop(
+                    '_FillValue', self.dataset[_var].encoding.get('_FillValue', int_fill_value)
+                )
+                if fill is None or (isinstance(fill, float) and not np.isfinite(fill)):
+                    fill = int_fill_value
+                self.dataset[_var].attrs.pop('missing_value', None)
+                self.dataset[_var].encoding = {
+                    '_FillValue': self.dataset[_var].dtype.type(fill),
+                    'dtype': self.dataset[_var].dtype,
+                    'zlib': compress, 'complevel': complevel,
+                }
+            else:
+                self.dataset[_var].rio.update_encoding(climate_enc, inplace=True)
             
         self.dataset.attrs.update(TEMDS_version = Version())
         self.dataset.attrs.update(extra_attrs)
@@ -1850,16 +1920,24 @@ class YearlyDataset(TEMDataset):
 
             data =  xr.open_dataset(var_file)
             data = data.sel(time=slice(f'{year}-01-01', f'{year}-12-31'))
-            gt = data.rio.transform()
             ## Drop original encoding as we will redo this 
             ## to match our other data
             data = data.drop_encoding()
 
-            ## this does change lon_bnds as well, but why?
+            ## Files from `download cmip6-daily` are already -180..180; this
+            ## is a no-op for them but keeps raw 0..360 files working.
             data.coords['lon'] = (data.coords['lon'] + 180) % 360 - 180
-            data.coords['lon_bnds'] = (data.coords['lon_bnds'] + 180) % 360 - 180
+            if 'lon_bnds' in data.coords:
+                data.coords['lon_bnds'] = (data.coords['lon_bnds'] + 180) % 360 - 180
+            elif 'lon_bnds' in data:
+                data['lon_bnds'] = (data['lon_bnds'] + 180) % 360 - 180
 
             data = data.sortby(data.lon)
+            ## Any GeoTransform cached in spatial_ref describes the grid
+            ## *before* the shift/sort above (or is the identity transform
+            ## written by older downloads) and must not be reused.
+            if 'spatial_ref' in data.coords:
+                data = data.drop_vars('spatial_ref')
             
 
             ready_variables.append(data)
@@ -1873,6 +1951,15 @@ class YearlyDataset(TEMDataset):
         
         # return data
         ## we use 'noleap' calender
+        calendar = data.time.dt.calendar
+        if calendar == '360_day':
+            msg = (
+                f'{func_name}: 360_day calendars are not supported (converting '
+                'to noleap would leave 5 missing days per year).'
+            )
+            logger.error(msg)
+            raise errors.YearlyTimeSeriesError(msg)
+        # drops Feb 29 for standard/gregorian/proleptic_gregorian calendars
         data = data.convert_calendar('noleap')
         if data.time.size != 365:
             msg = (
@@ -1887,7 +1974,15 @@ class YearlyDataset(TEMDataset):
         new = YearlyDataset(year, data, logger=logger)
 
         source = cmip6.NAME
+        found = [v for v in climate_variables.aliases_for(source) if v in new.dataset.data_vars]
+        missing_required, missing_optional = cmip6.check_variables(found)
+        if missing_required:
+            logger.warn(f'{func_name}: {year}: required CMIP6 variables missing: {missing_required}')
+        if missing_optional:
+            logger.info(f'{func_name}: {year}: optional CMIP6 variables not present: {missing_optional}')
         for std_var, var in climate_variables.aliases_for(source, 'dict').items():
+            if var not in new.dataset.data_vars:
+                continue
             if climate_variables.has_conversion(std_var, source):
                 logger.info(f'{func_name}: Converting units for {var} to {std_var}')
                 new.dataset[var].values = climate_variables.to_std_units(
@@ -1902,9 +1997,10 @@ class YearlyDataset(TEMDataset):
         if calcualte_vapo:
             new.dataset = cmip6.callback_psl_to_vapo(new.dataset, logger, elevation=elevation)
 
-        new.dataset = new.dataset.rename(
-            climate_variables.aliases_for(cmip6.NAME, 'dict_r')
-        )
+        new.dataset = new.dataset.rename({
+            k: v for k, v in climate_variables.aliases_for(cmip6.NAME, 'dict_r').items()
+            if k in new.dataset.variables
+        })
   
         verified, reasons = new.verify()
         if not verified:
@@ -1918,8 +2014,10 @@ class YearlyDataset(TEMDataset):
             .rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True)\
             .rio.write_coordinate_system(inplace=True)
         
-        # gt = (-180.0, 1.8617204339585491, 0.0, 83.75, 0.0, -1.8617204339523812)
-        new.dataset.rio.write_transform(gt, inplace=True)
+        # Transform from the final (shifted, sorted) coordinates.
+        new.dataset.rio.write_transform(
+            gdal_tools.transform_from_coords(new.dataset), inplace=True
+        )
 
         return new
 

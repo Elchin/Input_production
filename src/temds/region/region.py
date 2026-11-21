@@ -24,6 +24,7 @@ import pyproj
 import xarray as xr
 from joblib import Parallel, delayed
 import shapely
+import shapely.geometry
 
 # from ..gdal_tools import empty_dataset
 from .. import corrections, downscalers
@@ -34,7 +35,7 @@ from .. import gdal_tools
 from .. import util
 from .mask import Mask
 from .manifest import Manifest
-from .tools import mask_boundary_compatibility_report, total_extent_as_geoseries
+from .tools import mask_boundary_compatibility_report, total_extent_as_geoseries, align_to_resolution
 from temds.constants import TEMDS_DATASET_NAMES
 
 import temds
@@ -43,6 +44,22 @@ class MaskBoundaryCompatibilityError(Exception):
     """Exception for region mask and  boundary incompatibility errors
     """
     pass
+
+def _as_int32(da, fill=-9999):
+    """Return DataArray `da` as int32 (NaN -> `fill`) with a clean encoding.
+
+    TEM expects integer run-mask, veg_class and drainage_class variables;
+    older temds versions stored them as float64.
+    """
+    values = np.asarray(da.values)
+    if not np.issubdtype(values.dtype, np.integer):
+        values = np.where(np.isfinite(values), values, fill)
+    out = da.copy(data=values.astype(np.int32))
+    out.attrs.pop('_FillValue', None)
+    out.attrs.pop('missing_value', None)
+    out.encoding = {'dtype': 'int32', '_FillValue': np.int32(fill)}
+    return out
+
 
 class Region(object):
     """
@@ -126,10 +143,45 @@ class Region(object):
         return msg
 
     def get_extent(self, crs=None, align_to=None):
+        """Bounds (minx, miny, maxx, maxy) of the region boundary, optionally
+        in another `crs` and aligned outward to `align_to` units.
 
+        When reprojecting, the boundary is densified first: straight edges
+        in a polar projection are curved in lon/lat, so reprojecting only
+        the vertices underestimates the extent. If the boundary contains
+        the North/South pole the geographic extent is widened to all
+        longitudes and to the pole.
+        """
         boundary = self.boundary
         if crs:
+            minx, miny, maxx, maxy = boundary.total_bounds
+            seg = max(maxx - minx, maxy - miny) / 100.0
+            if seg > 0:
+                boundary = boundary.segmentize(seg)
             boundary = boundary.to_crs(crs)
+            target = pyproj.CRS(crs)
+            if target.is_geographic:
+                bounds = list(total_extent_as_geoseries(boundary).total_bounds)
+                for pole_lat in (90, -90):
+                    pole = gpd.GeoSeries(
+                        [shapely.geometry.Point(0, pole_lat)], crs=target
+                    ).to_crs(self.boundary.crs)
+                    try:
+                        has_pole = bool(self.boundary.union_all().contains(pole.iloc[0]))
+                    except Exception:
+                        has_pole = False
+                    if has_pole:
+                        bounds[0], bounds[2] = -180.0, 180.0
+                        if pole_lat > 0:
+                            bounds[3] = 90.0
+                        else:
+                            bounds[1] = -90.0
+                extent = gpd.GeoSeries(
+                    shapely.geometry.box(*bounds), [0], boundary.crs
+                )
+                if align_to:
+                    extent = align_to_resolution(extent, align_to)
+                return extent.total_bounds
 
         return total_extent_as_geoseries(boundary, align_to).total_bounds
 
@@ -439,10 +491,23 @@ class Region(object):
             should be a key in self.data which corresponds to a dataset which
             can be exported to TEM format.
         where: Path
-            directory to save exported data to. Will be created if it does not
-            exist. Data will be saved to this directory with the name
-            {dataset_name}.nc, where dataset_name is the value of the
-            dataset_name parameter.
+            directory to save exported data to. Data is written to
+            `where`/tem_export (created if it does not exist).
+        kwargs:
+            'source_directory': Path, defaults to `where`
+                region directory (with manifest.yml) to lazily load items
+                from when they are not already loaded.
+            'cru_item': str, defaults 'crujra-downscaled'
+                region item exported as `cru_climate`
+                (to {cru_item}-historic-climate.nc)
+            'cmip_item': str, defaults 'cmip6-ssp245-downscaled'
+                region item exported as `cmip_climate`
+                (to {cmip_item}-projected-climate.nc)
+            'era5_item': str, defaults 'era5-downscaled'
+                region item exported as `era5_climate`
+                (to {era5_item}-historic-climate.nc). ERA5 provides
+                tair_avg, prec, nirr and vapo only, which is all the TEM
+                climate files contain.
 
         Questions:
          - should this export all data in a region object? Not all possible keys
@@ -467,11 +532,18 @@ class Region(object):
         if dataset_name not in TEMDS_DATASET_NAMES:
             raise NotImplementedError(f"Invalid dataset name for TEM export: {dataset_name}. Must be one of {TEMDS_DATASET_NAMES}.")
 
-        # Not really sure about this.....
-        assert self.name == where.stem, f"Region name {self.name} does not match destination directory name {where.stem}. Please ensure the destination directory is named the same as the region you want to export."  
+        source_directory = Path(kwargs.get('source_directory') or where)
+        cru_item = kwargs.get('cru_item') or 'crujra-downscaled'
+        cmip_item = kwargs.get('cmip_item') or 'cmip6-ssp245-downscaled'
+        era5_item = kwargs.get('era5_item') or 'era5-downscaled'
+        if self.name != Path(where).name:
+            self.logger.warn(
+                f"{function_name}: region name {self.name} differs from "
+                f"destination directory name {Path(where).name}; exporting "
+                f"to {Path(where) / 'tem_export'} anyway."
+            )
 
-
-        destination = where / "tem_export"
+        destination = Path(where) / "tem_export"
         destination.mkdir(exist_ok=True, parents=True)
 
         if dataset_name == 'co2':
@@ -523,7 +595,7 @@ class Region(object):
         if dataset_name == 'topo':
             self.logger.info("Exporting topo data to TEM format...")
             if dataset_name not in self.data.keys():
-                self.lazy_import(where, 'topo')
+                self.lazy_import(source_directory, 'topo')
 
             self.logger.info("Converting topo data to TEM format...")
             T = self.data['topo'].dataset.drop(['TPI', 'drainage_class'])
@@ -540,10 +612,11 @@ class Region(object):
         if dataset_name == 'drainage':
             self.logger.info("Exporting drainage data to TEM format...")
             if 'topo' not in self.data.keys():
-                self.lazy_import(where, 'topo')
+                self.lazy_import(source_directory, 'topo')
 
             self.logger.info("Converting drainage data to TEM format...")
             D = self.data['topo'].dataset.drop(['elevation', 'TPI', 'slope', 'aspect'])
+            D['drainage_class'] = _as_int32(D['drainage_class'])
             D['Y'] = np.arange(D.sizes['y'])
             D['X'] = np.arange(D.sizes['x'])
             self.logger.info(f"Saving file to {destination / 'drainage.nc'}...")
@@ -559,7 +632,7 @@ class Region(object):
             # dims, coords, etc.
             self.logger.info("...using vegetation data as a template for the run mask...")
             if 'vegetation' not in self.data.keys():
-                self.lazy_import(where, 'vegetation')
+                self.lazy_import(source_directory, 'vegetation')
             veg_ds = self.data['vegetation'].dataset
             mask = veg_ds.copy()
             mask = mask.rename({'veg_class':'run'})
@@ -574,6 +647,7 @@ class Region(object):
             # setup to run with TEM...
             self.logger.info("turn on mask for all valid veg class px...")
             mask.run.data = np.where(veg_ds['veg_class'] <= 0, 0, mask.run.data) 
+            mask['run'] = _as_int32(mask['run'])
 
             mask['Y'] = np.arange(mask.sizes['y'])
             mask['X'] = np.arange(mask.sizes['x'])
@@ -587,10 +661,11 @@ class Region(object):
 
             self.logger.info("Exporting vegetation data to TEM format...")
             if dataset_name not in self.data.keys():
-                self.lazy_import(where, 'vegetation')
+                self.lazy_import(source_directory, 'vegetation')
 
             self.logger.info("Converting vegetation data to TEM format...")
             V = self.data[dataset_name].dataset
+            V['veg_class'] = _as_int32(V['veg_class'])
             V['Y'] = np.arange(V.sizes['y'])
             V['X'] = np.arange(V.sizes['x'])
             self.logger.info(f"Saving file to {destination / 'vegetation.nc'}...")
@@ -602,7 +677,7 @@ class Region(object):
         if dataset_name == 'soiltex':
             self.logger.info("Exporting soil texture data to TEM format...")
             if dataset_name not in self.data.keys():
-                self.lazy_import(where, 'soiltex')
+                self.lazy_import(source_directory, 'soiltex')
 
             self.logger.info("Converting soil texture data to TEM format...")
             ST = self.data[dataset_name].dataset
@@ -614,16 +689,16 @@ class Region(object):
             ST.to_netcdf(destination / 'soil-texture.nc')
             return 0
 
-        if dataset_name == 'cru_climate' or dataset_name == 'cmip_climate':
+        if dataset_name in ('cru_climate', 'era5_climate', 'cmip_climate'):
 
             if dataset_name == 'cru_climate':
-                ds_key_name = 'crujra-downscaled'
-                if 'crujra-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'crujra-downscaled')
+                ds_key_name = cru_item
+            if dataset_name == 'era5_climate':
+                ds_key_name = era5_item
             if dataset_name == 'cmip_climate':
-                ds_key_name = 'cmip6-ssp245-downscaled'
-                if 'cmip6-ssp245-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'cmip6-ssp245-downscaled')
+                ds_key_name = cmip_item
+            if ds_key_name not in self.data.keys():
+                self.lazy_import(source_directory, ds_key_name)
 
             target_vars = {
                 'tair_avg': 'mean', 
@@ -642,9 +717,19 @@ class Region(object):
             # Check per variable units attr presence in last yr of source data
             for v in self.data[ds_key_name].data[-1].dataset.variables:
                 if 'units' not in self.data[ds_key_name].data[-1].dataset[v].attrs:
-                    print("No units for variable: ", v)
+                    self.logger.warn(f"No units for variable: {v}")
 
             ds_monthly = self.data[ds_key_name].synthesize_to_monthly(target_vars, new_names)
+            # Monthly TEM units (prec is summed to a monthly total). Set
+            # explicitly instead of carrying over cf_units names such as
+            # '0.001 meter' or 'kilogram-second^-3' from the daily data.
+            tem_units = {
+                'tair': 'celsius', 'precip': 'mm/month',
+                'nirr': 'W/m^2', 'vapor_press': 'kPa',
+            }
+            for var, unit in tem_units.items():
+                if var in ds_monthly:
+                    ds_monthly[var].attrs['units'] = unit
 
             # Guard against upstream calculations (e.g. vapor pressure from psl/elevation)
             # unintentionally promoting a variable to float64.
@@ -656,10 +741,10 @@ class Region(object):
             # Check units attr presence in synthesized data
             for v in ds_monthly.data_vars:
                 if 'units' not in ds_monthly[v].attrs:
-                    self.logger.warn("No units for variable: ", v)
+                    self.logger.warn(f"No units for variable: {v}")
 
-            if 'TEMDS_version' in self.data[ds_key_name].data[1].dataset.attrs:
-                ds_monthly.attrs['source_data_version'] = self.data[ds_key_name].data[1].dataset.attrs['TEMDS_version']
+            if 'TEMDS_version' in self.data[ds_key_name].data[-1].dataset.attrs:
+                ds_monthly.attrs['source_data_version'] = self.data[ds_key_name].data[-1].dataset.attrs['TEMDS_version']
             else:
                 self.logger.warn("No TEMDS_version attr in source data, cannot set source_data_version attr in output TEM dataset.")
                 ds_monthly.attrs['source_data_version'] = 'unknown'
@@ -689,9 +774,11 @@ class Region(object):
             #np.nan_to_num(ds_monthly['nirr'], copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
             if dataset_name == 'cru_climate':
-                outname = 'crujra-downscaled-historic-climate.nc'
+                outname = f'{cru_item}-historic-climate.nc'
+            elif dataset_name == 'era5_climate':
+                outname = f'{era5_item}-historic-climate.nc'
             elif dataset_name == 'cmip_climate':
-                outname = 'cmip6-ssp245-downscaled-projected-climate.nc'
+                outname = f'{cmip_item}-projected-climate.nc'
             else:
                 assert False, "This should never happen"
             self.logger.info(f"Saving file to {destination / outname}...")
@@ -704,7 +791,7 @@ class Region(object):
         if dataset_name == 'fri_fire':
             self.logger.info("Exporting FRI fire data to TEM format...")
             if 'fri-fire' not in self.data.keys():
-                self.lazy_import(where, 'fri-fire')
+                self.lazy_import(source_directory, 'fri-fire')
             self.logger.info("Converting FRI fire data to TEM format...")
             F = self.data['fri-fire'].dataset
             F['Y'] = np.arange(F.sizes['y'])
@@ -728,14 +815,14 @@ class Region(object):
             # Also need to grab the spatial reference coordinates from the reference dataset.
             if 'historic' in dataset_name:
                 if 'crujra-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'crujra-downscaled')
+                    self.lazy_import(source_directory, 'crujra-downscaled')
                 self.logger.info("Pulling time axis from cru...")
                 ts = self.data['crujra-downscaled']
                 ref_ds = ts.data[0].dataset
                 out_name = 'historic-explicit-fire.nc'
             elif 'projected' in dataset_name:
                 if 'cmip6-ssp245-downscaled' not in self.data.keys():
-                    self.lazy_import(where, 'cmip6-ssp245-downscaled')
+                    self.lazy_import(source_directory, 'cmip6-ssp245-downscaled')
                 self.logger.info("Pulling time axis from cmip...")
                 ts = self.data['cmip6-ssp245-downscaled']
                 ref_ds = ts.data[0].dataset
@@ -869,21 +956,10 @@ class Region(object):
         # for var, info in variables.items():
         for var in variables:
             func = corrections.LOOKUP[var]
-            self.logger.info(f'.. Calculating correction factor for {var} with {func}')
-
-            current = func(baseline[var], reference[var])
-
-            if not(baseline[var].attrs.get('units') and reference[var].attrs.get('units')):
-                self.logger.warn(f"One of the datasets for variable {var} is missing units. This may cause issues with the correction factor calculation. Please ensure that both datasets have units specified in their attributes.")
-            elif baseline[var].attrs.get('units') != reference[var].attrs.get('units'):
-                # could be smarter here and use CFUnits to see if they are actually the same unit in a different form...
-                self.logger.warn(f"Units for variable {var} do not match between baseline and reference datasets. This may cause issues with the correction factor calculation. Please ensure that both datasets have the same units specified in their attributes.")   
-            else:
-                current.attrs['units'] = reference[var].attrs['units']
-
-            # This picks up any other attributes, like long_name, standard_name, etc.
-            current.attrs.update(baseline[var].attrs)
-
+            self.logger.info(f'.. Calculating correction factor for {var} with {func.__name__}')
+            current = corrections.calculate(
+                var, baseline[var], reference[var], logger=self.logger
+            )
             current.name = var
             temp.append(current)
 
@@ -998,7 +1074,7 @@ class Region(object):
                     source_id, 
                     correction_id, 
                     variables
-                    ) for year in self.data[source_id].range()
+                    ) for year in years
             )
             self.mask = mask_backup
         else:

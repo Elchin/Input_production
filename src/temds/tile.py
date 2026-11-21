@@ -419,8 +419,9 @@ class Tile(object):
             func = corrections.LOOKUP[var]
             self.logger.info(f'.. Calculating correction factor for {var} with {func}')
 
-            current = func(baseline[var], reference[var])
-            current.name = var
+            current = corrections.calculate(
+                var, baseline[var], reference[var], logger=self.logger
+            )
             temp.append(current)
            
 

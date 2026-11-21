@@ -1,6 +1,7 @@
 """
 """
 from pathlib import Path
+import numbers
 from copy import deepcopy
 
 from osgeo import gdal
@@ -8,6 +9,7 @@ import pyproj
 import shapely
 import geopandas as gpd
 from affine import Affine
+import numpy as np
 
 from . import tools
 from .. import gdal_tools
@@ -17,6 +19,30 @@ from .. import gdal_tools
 
 class NonIntersectingGeoSeriesError(Exception):
     pass
+
+
+def normalize_resolution(resolution):
+    """Return resolution as a positive ``(x_res, y_res)`` tuple.
+
+    Accepts a single number (square pixels) or an ``(x_res, y_res)`` pair, as
+    returned by ``Mask.resolution`` / GDAL geotransforms where the y
+    resolution is usually negative.  Signs are dropped; callers apply the
+    north-up convention (negative y step) themselves.
+    """
+    if isinstance(resolution, numbers.Real) and not isinstance(resolution, bool):
+        x_res = y_res = float(resolution)
+    else:
+        try:
+            x_res, y_res = resolution
+        except (TypeError, ValueError):
+            raise TypeError(
+                f'resolution must be a number or an (x, y) pair, got {resolution!r}'
+            )
+        x_res, y_res = float(x_res), float(y_res)
+    x_res, y_res = abs(x_res), abs(y_res)
+    if x_res == 0 or y_res == 0:
+        raise ValueError('resolution must be non-zero')
+    return x_res, y_res
 
 class Mask(object):
     """Object to manage mask for temds region objects.
@@ -53,6 +79,8 @@ class Mask(object):
         
         """
 
+        x_res, y_res = normalize_resolution(resolution)
+
         if extent_gpd is None:
             extent_gpd = mask_series
         elif align_extent_to_resolution:
@@ -61,7 +89,7 @@ class Mask(object):
 
             mask_series = mask_series.intersection(extent_gpd)
 
-            extent_gpd = tools.align_to_resolution(extent_gpd, resolution)
+            extent_gpd = tools.align_to_resolution(extent_gpd, (x_res, y_res))
         
         name = 'aoi_mask'
         layer_name = f'{name}_{extent_gpd.crs.to_epsg()}' # For shapefiles, this seems to be the filename
@@ -75,8 +103,8 @@ class Mask(object):
         opts = gdal.RasterizeOptions(
           format='MEM',
           outputBounds=(bounds['minx'], bounds['miny'], bounds['maxx'], bounds['maxy']),
-          xRes=resolution,
-          yRes=resolution,
+          xRes=x_res,
+          yRes=y_res,
           noData=0,
           burnValues=[1],
           layers=[layer.GetName()],
@@ -96,18 +124,22 @@ class Mask(object):
         """
         init_boundary = deepcopy(extent_gpd)
 
-        if isinstance(resolution, (int, float)):
-            resolution = (resolution, -resolution)
+        # Accept a scalar or an (x, y) pair (PR #48); everything below works
+        # with positive x/y pixel sizes.
+        x_res, y_res = normalize_resolution(resolution)
 
         if align_extent_to_resolution:
-            extent_gpd = tools.align_to_resolution(extent_gpd, resolution)
+            extent_gpd = tools.align_to_resolution(extent_gpd, (x_res, y_res))
 
         bounds = extent_gpd.bounds.iloc[0]
+        # small epsilon guards against float round-off (e.g. 199999.9999/4000)
+        n_x = int(np.floor((bounds['maxx'] - bounds['minx']) / x_res + 1e-9))
+        n_y = int(np.floor((bounds['maxy'] - bounds['miny']) / y_res + 1e-9))
         rds = gdal_tools.empty_dataset(
-            int((bounds['maxx'] - bounds['minx'])//resolution),
-            int((bounds['maxy'] - bounds['miny'])//resolution),
+            n_x,
+            n_y,
             extent_gpd.crs.to_wkt(),
-            (bounds['minx'], resolution, 0, bounds['maxy'], 0,  -resolution ),
+            (bounds['minx'], x_res, 0, bounds['maxy'], 0,  -y_res ),
             1,
             gdal.GDT_Int16
         )  

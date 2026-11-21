@@ -219,6 +219,48 @@ def to_std_units(data, std_var, source):
         return src_units.convert(data, std_units)
     return data
 
+def parse_unit(unit):
+    """Parse a unit string (or Unit) with cf_units; None if not parseable"""
+    if isinstance(unit, Unit):
+        return unit
+    if unit is None or str(unit).strip() == '':
+        return None
+    try:
+        return Unit(str(unit))
+    except ValueError:
+        return None
+
+
+def units_equivalent(a, b):
+    """True if unit strings `a` and `b` describe the same unit
+    (e.g. 'celsius' and 'degree_Celsius', 'W/m^2' and 'kilogram-second^-3',
+    'mm' and '0.001 meter'). Falls back to string comparison when a unit
+    can not be parsed.
+    """
+    ua, ub = parse_unit(a), parse_unit(b)
+    if ua is None or ub is None:
+        return str(a) == str(b)
+    return ua == ub
+
+
+def convert_units(data, from_unit, to_unit):
+    """Convert `data` from `from_unit` to `to_unit` using cf_units.
+
+    Raises
+    ------
+    ValueError
+        if units are not parseable or not convertible
+    """
+    uf, ut = parse_unit(from_unit), parse_unit(to_unit)
+    if uf is None or ut is None:
+        raise ValueError(f'can not parse units {from_unit!r} / {to_unit!r}')
+    if uf == ut:
+        return data
+    if not uf.is_convertible(ut):
+        raise ValueError(f'units {from_unit!r} and {to_unit!r} are not convertible')
+    return uf.convert(data, ut)
+
+
 def lookup_alias(source, alias):
     """looks up ClimateVariable based on source and 
     alias

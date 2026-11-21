@@ -39,9 +39,21 @@ def extra_tem_files(
 
     ):
     """
-    Function to prepare extra files for TEM, e.g.: vegetation, etc
+    Prepare the extra TEM inputs for a region (--use-region is required):
+    synthetic FRI fire, vegetation (CMT) from TEM_Landcover_V4 + RESOLVE
+    ecoregions + geoBoundaries, and soil texture from SoilGrids (0-100 cm
+    thickness weighted mean of the 0-5, 5-15, 15-30, 30-60, 60-100 cm layers).
+
+    DATA_PATH must contain vegetation/, mask/ and soiltexture/ laid out as
+    described in the README. DESTINATION is the region directory (used to
+    find topo.nc). The local --overwrite and the global --overwrite flag
+    are equivalent.
     """
     log = context.obj.log
+    overwrite = overwrite or context.obj.overwrite
+    if not context.obj.region:
+        log.error('downscale extra-tem-files needs --use-region')
+        sys.exit(1)
 
 
     log.info('Preparing TEM fri fire data...')
@@ -110,7 +122,7 @@ def delta_method(
         save_baseline: Annotated[str, Option(help="Flag to save baseline data when it has to be calculated")] = False,
         correction_factors: Annotated[str, Option(help="Path to optional precalculated correction factor data to use, See note if --use-region flag is provided.")] = None,
         save_correction_factors: Annotated[str, Option(help="Flag to save correction factor data when it has to be calculated")] = False,
-        downscale_years: Annotated[tuple[int, int], Option(help="Start and end of years to download data for. Will default to full range available if not provided")] = None,
+        downscale_years: Annotated[tuple[int, int], Option(help="Start and end of years (inclusive) to downscale. Will default to full range available if not provided (also honoured with --parallel)")] = None,
     ):
     """This command downscale data via the delta-method
 
@@ -184,6 +196,10 @@ def delta_method(
 
         log.info('Setup complete!')
 
+    if not baseline and not baseline_years:
+        log.error('Either --baseline or --baseline-years START END (inclusive) is required.')
+        sys.exit(1)
+
     if not baseline:
         log.info("Baseline data was not provided, Calculating......")
         if not baseline_name:
@@ -210,6 +226,16 @@ def delta_method(
 
     if not variables:
         variables = [v for v in area.data[to_downscale].data[0].dataset.data_vars if v in climate_variables.DOWNSCALE_SAFE]
+
+    # A variable can only be downscaled if the baseline and the reference
+    # have it too (e.g. CESM2 historical has no daily tasmin/tasmax on
+    # Pangeo, but ssp245 does).
+    have_baseline = set(area.data[baseline].dataset.data_vars)
+    have_reference = set(area.data[reference].dataset.data_vars)
+    dropped = [v for v in variables if v not in have_baseline or v not in have_reference]
+    if dropped:
+        log.warn(f'Not downscaling {dropped}: missing from baseline ({baseline}) or reference ({reference}).')
+        variables = [v for v in variables if v not in dropped]
     
     log.info(f'Downscaling {variables}')
     # sys.exit()

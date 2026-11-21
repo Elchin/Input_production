@@ -8,7 +8,7 @@ TODO:
 """
 from pathlib import Path
 
-from typer import Typer, Argument, Option, Context
+from typer import Typer, Argument, Option, Context, Exit
 from typing import Annotated
 
 import xarray as xr
@@ -34,7 +34,8 @@ def era5_daily(
         context: Context,
         destination: common.DESTINATION_DIR,
         source: common.SOURCE_DIR,
-        years: Annotated[tuple[int, int], Argument(help="Range of years to preprocess ERA5 daily data for.")] = None
+        years: Annotated[tuple[int, int], Argument(help="Range of years to preprocess ERA5 daily data for.")] = None,
+        name: Annotated[str, Option(help="Region item name used with --use-region")] = 'era5',
         # years: common.ERA5_YEARS = None,
         # years_as_range: common.YEAR_RANGE_FLAG = False,
         # overwrite: common.OVERWRITE_FLAG = True,
@@ -42,18 +43,31 @@ def era5_daily(
     ):
     """This command preprocesses downloaded ERA5 daily data. Preprocessed data 
     will be formatted to be read as a YearlyDataset.
+
+    With --use-region the merged data are warped to the region grid and
+    saved as the region item NAME (default 'era5', i.e.
+    <region>/era5/era5-<year>.nc) and added to the manifest, like
+    `region import-data`; DESTINATION is not used.
     """
     log = context.obj.log
     overwrite = context.obj.overwrite
     cleanup = context.obj.cleanup
+    parallel = context.obj.parallel
+    n_process = context.obj.get_n_process()
     log.info('Starting preprocessing of ERA5-daily data')
 
+    region_data = None
+    if context.obj.region:
+        region_item = context.obj.region_directory / name
+        if Path(destination).resolve() != region_item.resolve():
+            log.info(
+                f'--use-region: output goes to {region_item}; '
+                f'DESTINATION ({destination}) is not used.'
+            )
+        destination = region_item
+        region_data = []
 
-    if context.obj.region: ## TODO suport region in this function
-        destination = context.obj.region_directory / 'ERA5-'
-
-
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
     downloads = source
     downloads = Path(downloads)
@@ -65,21 +79,38 @@ def era5_daily(
     for year in years:
         log.info(f'Preprocessing year: {year}')
 
-        yearly_files = list(downloads.glob(f'*{year}*.nc'))
+        try:
+            yearly_files = datasources.era5_daily.find_yearly_files(downloads, year)
+        except FileNotFoundError as e:
+            log.error(str(e))
+            raise Exit(1)
         log.info(f'.. Files found {[f.name for f in yearly_files]}.')
 
         yearly_data = [xr.open_dataset(file) for file in yearly_files]
         log.info(f'.. Merging')
         merged = datasources.era5_daily.merge_for_year(year, yearly_data)
 
-        save_to = destination/f'daily-ERA5-{year}.nc'
-        log.info(f'.. Saving to {save_to}.')
-        merged.save(save_to, overwrite=overwrite)
+        if region_data is not None:
+            merged.dataset.load()
+            region_data.append(merged)
+        else:
+            save_to = destination/f'daily-ERA5-{year}.nc'
+            log.info(f'.. Saving to {save_to}.')
+            merged.save(save_to, overwrite=overwrite)
 
         [ds.close() for ds in yearly_data]
         if cleanup:
             log.info(f'.. Cleanup. removing {[f.name for f in yearly_files]}.')
             [file.unlink(file) for file in yearly_files]
+
+    if region_data is not None:
+        area = context.obj.region
+        data = datasources.timeseries.YearlyTimeSeries(region_data)
+        log.info(f'Importing ERA5 to region {area.name} as {name}')
+        with parallel_config(backend="loky", n_jobs=n_process, verbose=1):
+            area.import_datasource(name, data, parallel=parallel)
+        with parallel_config(backend="loky", n_jobs=n_process, verbose=1):
+            context.obj.callback_export_region([name], parallel=parallel)
     log.info('Complete!')
 
 @app.command()
@@ -97,8 +128,13 @@ def cmip6_daily(
         # overwrite: common.OVERWRITE_FLAG = False,
         # cleanup: common.CLEANUP_FLAG = False
     ):
-    """This command preprocesses CMIP6 daily data to use in downscaling. If topo
-    is provided the variable for VAPO is calculated otherwise it is not.
+    """This command preprocesses CMIP6 daily data to use in downscaling.
+
+    Produces tair_avg, prec, nirr and, when the member provides them,
+    tair_min/tair_max (tasmin/tasmax) and wind (sfcWind). vapo is
+    calculated from psl, huss and tas only when topo is available (the
+    region's topo.nc, or --topo without a region); otherwise it is skipped
+    with a warning.
     """
     log = context.obj.log
     overwrite = context.obj.overwrite
@@ -109,9 +145,14 @@ def cmip6_daily(
     log.info('Starting preprocessing of CMIP6 Daily data')
 
     if context.obj.region:
+        if Path(destination).resolve() != (context.obj.region_directory/ name).resolve():
+            log.info(
+                f'--use-region: output goes to {context.obj.region_directory/ name}; '
+                f'DESTINATION ({destination}) is not used.'
+            )
         destination = context.obj.region_directory/ name
         
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
 
     start_year = None
@@ -141,13 +182,13 @@ def cmip6_daily(
     try: 
         if context.obj.region:
             area = context.obj.region
-            try:
-                topo = datasources.dataset.TEMDataset(
-                        context.obj.region_directory/'topo.nc', log
-                )
-                area.import_datasource('topo', topo)
-            except:
-                pass
+            topo_file = context.obj.region_directory/'topo.nc'
+            if 'topo' not in area.data and topo_file.exists():
+                try:
+                    topo = datasources.dataset.TEMDataset(topo_file, log)
+                    area.import_datasource('topo', topo)
+                except Exception as e:
+                    log.warn(f'Could not load {topo_file}: {e}')
 
             log.info('Preprocessing to region')
             context.obj.runtime_data['source'] = data
@@ -157,7 +198,12 @@ def cmip6_daily(
                 callback_fn = cmip6.callback_psl_to_vapo
                 elevation = area.data['topo'].dataset['elevation']
             else:
-                log.info('With out VAPO, no topo found')
+                log.warn(
+                    'No topo found for the region: vapo will NOT be produced '
+                    '(it needs elevation to turn psl into surface pressure). '
+                    'Run `preprocess topo` first and pass --load-item topo '
+                    '(or omit --no-load-all).'
+                )
                 callback_fn = None
                 elevation = None
 
@@ -171,11 +217,11 @@ def cmip6_daily(
             destination_format = name+'-{year}.nc'
             if topo:
                 log.info('Adding VAPO')
-                topo = datasources.dataset.TEMdataset(topo)
+                topo = datasources.dataset.TEMDataset(topo)
                 elevation = topo.dataset['elevation']
                 data.dataset = cmip6.callback_psl_to_vapo(data.dataset, log, elevation=elevation)
             else:
-                log.info('Skipping VAPO, no topo data')
+                log.warn('No --topo given: vapo will NOT be produced (needs elevation).')
 
             data.save(destination, destination_format, overwrite=overwrite)
     except FileExistsError:
@@ -208,7 +254,7 @@ def worldclim(
     else: 
         region = Region.from_mask(Mask.from_file(extent_file), logger=log)
 
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
     data = datasources.dataset.TEMDataset.from_worldclim(
             source,
@@ -250,7 +296,7 @@ def topo(
     else: 
         region = Region.from_mask(Mask.from_file(extent_file))
 
-    if destination.exists() and overwrite == False: context.obj.overwrite_disabled_exit()
+    if common.output_exists(destination) and overwrite == False: context.obj.overwrite_disabled_exit()
 
     topo_ds = datasources.dataset.TEMDataset.from_topo(
         source, region, 

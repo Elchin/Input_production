@@ -13,8 +13,20 @@ from pathlib import Path
 
 import requests
 
-def download_all_files(url: str, output_dir: Path):
-    """Download all files from a directory listing"""
+def download_all_files(url: str, output_dir: Path, overwrite: bool = False,
+                       include: str = None):
+    """Download all files from a directory listing
+
+    Parameters
+    ----------
+    url: str
+        directory listing URL
+    output_dir: Path
+    overwrite: bool, default False
+        re-download files that already exist locally
+    include: str, optional
+        regular expression; only file names matching it are downloaded
+    """
 
     response = requests.get(url)
     response.raise_for_status()
@@ -28,30 +40,29 @@ def download_all_files(url: str, output_dir: Path):
     file_links = [f for f in file_links if not f.startswith('/:dir_browser/')]
     file_links = [f for f in file_links if not f.startswith('https://')]
 
+    if include is not None:
+        file_links = [f for f in file_links if re.search(include, f)]
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Note that this doesn't handle the checksum verification. Each page
     # comes with a checksum.sha266.txt file that could be used. The name of the 
     # file is the same for sand/silt/clay, so it is overwritten or ignored.
-    # Also could cut down on the downloads by only getting the 3 files needed 
-    # (15-30, 30-60, 60-100cm)
+    # Pass `include` (a regex, e.g. soil_texture.FILE_REGEX) to only get the
+    # files needed (0-5, 5-15, 15-30, 30-60, 60-100 cm means).
     print(f'{file_links=}')
     for filename in file_links:
         if filename not in ['..', '../']:
             file_url = url.rstrip('/') + '/' + filename
             local_file = output_path / filename
 
-            if local_file.exists():
+            if local_file.exists() and not overwrite:
                 print(f"Skipped (exists): {filename}")
                 continue
 
             print(f"Downloading: {filename}")
-            file_response = requests.get(file_url)
-            file_response.raise_for_status()
-
-            with open(local_file, 'wb') as f:
-                f.write(file_response.content)
+            download(file_url, output_path, overwrite=True)
 
 def download(url: str, location: Path, overwrite: bool=False):
     """Download file at url to location
@@ -81,11 +92,17 @@ def download(url: str, location: Path, overwrite: bool=False):
     if not local_file.exists() or overwrite:
         location.mkdir(parents=True, exist_ok=True)
 
-        r = requests.get(url)
-        if r.status_code != 200:
-            raise FileNotFoundError(f'File to download could not be found at remote: {url}')
-        with local_file.open('wb') as new_file:
-            new_file.write(r.content)
+        # stream to a temporary name so large files (multi-GB WorldClim
+        # archives) are not held in memory and partial downloads are not
+        # mistaken for complete files
+        partial = local_file.with_name(local_file.name + '.part')
+        with requests.get(url, stream=True, timeout=600) as r:
+            if r.status_code != 200:
+                raise FileNotFoundError(f'File to download could not be found at remote: {url}')
+            with partial.open('wb') as new_file:
+                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                    new_file.write(chunk)
+        partial.replace(local_file)
     else:
         raise FileExistsError(
             f"Local file exists {local_file}"

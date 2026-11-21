@@ -83,6 +83,64 @@ API_VARIABLES = {
 
 DEFAULT_BOUNDS = [90, -180, 30, 180]
 
+#: Default buffer (degrees) added around a region's lon/lat extent when
+#: building the CDS ``area``. 1 degree is 4 ERA5 cells, enough for the
+#: coarse cells to fully cover the region edges when warping.
+DEFAULT_BUFFER_DEGREES = 1.0
+
+ERA5_RESOLUTION = 0.25
+
+
+class ERA5DownloadError(IOError):
+    """A CDS request failed. The message carries the original CDS error
+    (e.g. licence not accepted, bad credentials, invalid request)."""
+
+
+def bounds_from_extent(extent, buffer_degrees=DEFAULT_BUFFER_DEGREES):
+    """Convert a lon/lat extent to a CDS ``area`` request.
+
+    Parameters
+    ----------
+    extent: tuple
+        (min lon, min lat, max lon, max lat) in EPSG:4326, e.g. from
+        ``Region.get_extent(4326)``.
+    buffer_degrees: float
+        Buffer added on every side, then snapped outward to the 0.25 degree
+        ERA5 grid and clipped to valid lon/lat.
+
+    Returns
+    -------
+    list
+        [max lat, min lon, min lat, max lon] (CDS ``area`` order)
+    """
+    import math
+    minx, miny, maxx, maxy = [float(v) for v in extent]
+    res = ERA5_RESOLUTION
+    snap_dn = lambda v: math.floor(v / res) * res
+    snap_up = lambda v: math.ceil(v / res) * res
+    north = min(90.0, snap_up(maxy + buffer_degrees))
+    south = max(-90.0, snap_dn(miny - buffer_degrees))
+    west = snap_dn(minx - buffer_degrees)
+    east = snap_up(maxx + buffer_degrees)
+    if east - west >= 360 or west < -180 or east > 180:
+        # all longitudes (pole in region or antimeridian crossing)
+        west, east = -180.0, 180.0
+    return [north, west, south, east]
+
+#: Readable 'units' attributes for the preprocessed daily data. cf_units
+#: Unit.name gives e.g. '0.001 meter', 'kilogram-second^-3' and
+#: '1000 pascal', which are correct but unreadable. Labels must stay
+#: equivalent to the TEMDS std units (climate_variables), because
+#: corrections and TEMDataset.verify compare them; daily prec is therefore
+#: 'mm' (per day, as for the other daily sources).
+UNIT_LABELS = {
+    'tair_avg': 'celsius',
+    'dewpoint': 'celsius',
+    'prec': 'mm',
+    'nirr': 'W/m^2',
+    'vapo': 'kPa',
+}
+
 ## REGISTER CLIMATE VARIABLES
 climate_variables.register('tair_avg', NAME, 't2m')
 
@@ -130,7 +188,13 @@ def download_variable_for_year_month(
     -------
     Path, status
         Path is path to file.
-        status, is complete, skipped, or failed
+        status, is complete or skipped
+
+    Raises
+    ------
+    ERA5DownloadError
+        If the CDS request fails; the original exception is chained and its
+        message (e.g. the licence error text) is included.
     """
     where = Path(where)
     api_var = API_VARIABLES[variable]['name']
@@ -149,16 +213,17 @@ def download_variable_for_year_month(
         # "download_format": "zip",
     }
     save_to = where/f'{year}-{month:02}-{api_var}.nc'
+    if save_to.exists() and not overwrite:
+        return save_to, 'skipped'
     try:
-        if not save_to.exists() or overwrite:
-            cdsapi_tools.download(save_to, COLLECTION_ID, request)
-            status = 'complete'
-        else: 
-            status = 'skipped'
-    except: 
-        status = 'failed'
-    
-    return save_to, status
+        cdsapi_tools.download(save_to, COLLECTION_ID, request)
+    except Exception as e:
+        save_to.unlink(missing_ok=True) # do not leave a partial download
+        raise ERA5DownloadError(
+            f'CDS request for {api_var} {year}-{month:02} (area {bounds}) '
+            f'failed: {type(e).__name__}: {e}'
+        ) from e
+    return save_to, 'complete'
 
 def download_variable_for_date(
         where: Path | str, variable: str, date: 'Timestamp',
@@ -255,6 +320,33 @@ def download_variable_for_date(
 #     results.download(save_to)
 
 
+def yearly_file_name(variable: str, year: int) -> str:
+    """Name of the merged yearly download for a TEMDS variable, as written by
+    `download era5-daily` (e.g. '2000-2m_temperature.nc')."""
+    return f"{year}-{API_VARIABLES[variable]['name']}.nc"
+
+
+def find_yearly_files(directory: Path | str, year: int) -> list[Path]:
+    """Exact yearly download files for every variable in API_VARIABLES.
+
+    Unlike a '*{year}*.nc' glob this does not pick up monthly partials
+    ('2000-01-2m_temperature.nc'), files of other years or unrelated files.
+
+    Raises
+    ------
+    FileNotFoundError
+        Listing every missing file.
+    """
+    directory = Path(directory)
+    files = [directory / yearly_file_name(v, year) for v in API_VARIABLES]
+    missing = [f.name for f in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError(
+            f'Missing ERA5 yearly download(s) for {year} in {directory}: {missing}'
+        )
+    return files
+
+
 def merge_for_year(year: int, datasets: list[xr.Dataset]):
     """Merge all variables for a given year.
 
@@ -281,19 +373,22 @@ def merge_for_year(year: int, datasets: list[xr.Dataset]):
                 merged[src_name].values, std_name, source
             )
             cv = climate_variables.lookup_alias(source, src_name)
-            unit = cv.std_unit.name
             v_name = cv.name
-            merged[src_name].attrs.update(units=unit, name=v_name)
+            merged[src_name].attrs.update(units=UNIT_LABELS[std_name], name=v_name)
 
     rename_dict = climate_variables.aliases_for(source, 'dict_r')
     rename_dict.update({'longitude':'lon', 'latitude':'lat', 'valid_time':'time'})
     merged = merged.rename(rename_dict)
+
+    # Downscaling, baselines and TEM export assume 365-day years
+    # (constants.MONTH_START_DAYS). Keeping Feb 29 shifted every month
+    # after February by one day and dropped Dec 31 in leap years.
+    merged = merged.convert_calendar('noleap', dim='time')
     
     d2m = merged['dewpoint']
     merged['vapo'] = calculate_vapo_from_dewpoint(d2m)
-    unit = climate_variables.CLIMATE_VARIABLES['vapo'].std_unit.name
     v_name = climate_variables.CLIMATE_VARIABLES['vapo'].name
-    merged['vapo'].attrs.update(units=unit, name=v_name)
+    merged['vapo'].attrs.update(units=UNIT_LABELS['vapo'], name=v_name)
 
 
     merged.rio.write_crs('EPSG:4326',inplace=True)\

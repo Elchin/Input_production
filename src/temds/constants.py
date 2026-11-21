@@ -33,4 +33,9 @@ def get_month_slice(mn):
     return slice(MONTH_START_DAYS[mn]-1, DAYS_PER_MONTH[mn])
 
 
-TEMDS_DATASET_NAMES = 'runmask,co2,topo,vegetation,drainage,soiltex,cru_climate,cmip_climate,fri_fire,historic_explicit_fire,projected_explicit_fire'.split(',')
+TEMDS_DATASET_NAMES = 'runmask,co2,topo,vegetation,drainage,soiltex,cru_climate,era5_climate,cmip_climate,fri_fire,historic_explicit_fire,projected_explicit_fire'.split(',')
+
+#: Datasets exported by `export --which all`. era5_climate is an alternative
+#: historic climate to cru_climate (both write <item>-historic-climate.nc),
+#: so it is only exported when named explicitly.
+TEMDS_DEFAULT_EXPORT_NAMES = [n for n in TEMDS_DATASET_NAMES if n != 'era5_climate']
