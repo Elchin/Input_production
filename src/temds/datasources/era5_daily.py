@@ -91,6 +91,11 @@ DEFAULT_BUFFER_DEGREES = 1.0
 ERA5_RESOLUTION = 0.25
 
 
+class ERA5DownloadError(IOError):
+    """A CDS request failed. The message carries the original CDS error
+    (e.g. licence not accepted, bad credentials, invalid request)."""
+
+
 def bounds_from_extent(extent, buffer_degrees=DEFAULT_BUFFER_DEGREES):
     """Convert a lon/lat extent to a CDS ``area`` request.
 
@@ -169,7 +174,13 @@ def download_variable_for_year_month(
     -------
     Path, status
         Path is path to file.
-        status, is complete, skipped, or failed
+        status, is complete or skipped
+
+    Raises
+    ------
+    ERA5DownloadError
+        If the CDS request fails; the original exception is chained and its
+        message (e.g. the licence error text) is included.
     """
     where = Path(where)
     api_var = API_VARIABLES[variable]['name']
@@ -188,16 +199,17 @@ def download_variable_for_year_month(
         # "download_format": "zip",
     }
     save_to = where/f'{year}-{month:02}-{api_var}.nc'
+    if save_to.exists() and not overwrite:
+        return save_to, 'skipped'
     try:
-        if not save_to.exists() or overwrite:
-            cdsapi_tools.download(save_to, COLLECTION_ID, request)
-            status = 'complete'
-        else: 
-            status = 'skipped'
-    except: 
-        status = 'failed'
-    
-    return save_to, status
+        cdsapi_tools.download(save_to, COLLECTION_ID, request)
+    except Exception as e:
+        save_to.unlink(missing_ok=True) # do not leave a partial download
+        raise ERA5DownloadError(
+            f'CDS request for {api_var} {year}-{month:02} (area {bounds}) '
+            f'failed: {type(e).__name__}: {e}'
+        ) from e
+    return save_to, 'complete'
 
 def download_variable_for_date(
         where: Path | str, variable: str, date: 'Timestamp',

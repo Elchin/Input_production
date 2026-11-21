@@ -44,3 +44,27 @@ def test_bounds_from_region_contains_region():
     assert n >= maxy + 1 and s <= miny - 1 and w <= minx - 1 and e >= maxx + 1
     # much smaller than the old default 30-90N band
     assert (n - s) * (e - w) < 0.01 * (60 * 360)
+
+
+# ------------------------------------------------ CDS errors are surfaced
+def test_download_error_carries_cds_message(tmp_path, monkeypatch):
+    def boom(where, collection_id, request):
+        raise RuntimeError('403 Client Error: required licences not accepted')
+    monkeypatch.setattr(era5_daily.cdsapi_tools, 'download', boom)
+    with pytest.raises(era5_daily.ERA5DownloadError, match='licences not accepted') as info:
+        era5_daily.download_variable_for_year_month(tmp_path, 'tair_avg', 2000, 2, bounds=[71, -158, 67, -149])
+    assert '2m_temperature 2000-02' in str(info.value)
+    assert isinstance(info.value.__cause__, RuntimeError)
+
+
+def test_download_passes_area_and_skips_existing(tmp_path, monkeypatch):
+    seen = {}
+    def fake(where, collection_id, request):
+        seen.update(request)
+        where.write_text('x')
+    monkeypatch.setattr(era5_daily.cdsapi_tools, 'download', fake)
+    f, status = era5_daily.download_variable_for_year_month(tmp_path, 'prec', 2000, 1, bounds=[71, -158, 67, -149])
+    assert status == 'complete' and seen['area'] == [71, -158, 67, -149]
+    assert seen['variable'] == ['total_precipitation'] and seen['daily_statistic'] == 'daily_sum'
+    f, status = era5_daily.download_variable_for_year_month(tmp_path, 'prec', 2000, 1)
+    assert status == 'skipped'

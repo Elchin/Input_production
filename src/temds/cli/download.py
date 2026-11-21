@@ -100,21 +100,20 @@ def ERA5_daily(
                 )
                 if status == 'skipped':
                     log.info(f'...... File exists, download skipped.')
-                elif status == 'complete':
-                    log.info(f'...... Download complete.')
                 else:
-                    log.error(f'...... Download failed. exiting')
-                    raise IOError('aaaaa do something')
+                    log.info(f'...... Download complete.')
                 return file
 
-
-
-            with parallel_config(backend="loky", n_jobs=context.obj.get_n_process(), verbose=1):
-                yearly_files = Parallel()(
-                    delayed(download_helper)(date) for date in xr.date_range(
-                        f'{year}-01-01', f'{year}-12-31', freq = 'MS'
+            try:
+                with parallel_config(backend="loky", n_jobs=context.obj.get_n_process(), verbose=1):
+                    yearly_files = Parallel()(
+                        delayed(download_helper)(date) for date in xr.date_range(
+                            f'{year}-01-01', f'{year}-12-31', freq = 'MS'
+                        )
                     )
-                )
+            except era5_daily.ERA5DownloadError as e:
+                log.error(f'.... Download failed: {e}')
+                raise Exit(1)
 
 
             log.info(f'.... Merging partials to {save_to_final.name}')
