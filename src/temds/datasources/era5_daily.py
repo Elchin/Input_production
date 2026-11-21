@@ -127,6 +127,20 @@ def bounds_from_extent(extent, buffer_degrees=DEFAULT_BUFFER_DEGREES):
         west, east = -180.0, 180.0
     return [north, west, south, east]
 
+#: Readable 'units' attributes for the preprocessed daily data. cf_units
+#: Unit.name gives e.g. '0.001 meter', 'kilogram-second^-3' and
+#: '1000 pascal', which are correct but unreadable. Labels must stay
+#: equivalent to the TEMDS std units (climate_variables), because
+#: corrections and TEMDataset.verify compare them; daily prec is therefore
+#: 'mm' (per day, as for the other daily sources).
+UNIT_LABELS = {
+    'tair_avg': 'celsius',
+    'dewpoint': 'celsius',
+    'prec': 'mm',
+    'nirr': 'W/m^2',
+    'vapo': 'kPa',
+}
+
 ## REGISTER CLIMATE VARIABLES
 climate_variables.register('tair_avg', NAME, 't2m')
 
@@ -359,9 +373,8 @@ def merge_for_year(year: int, datasets: list[xr.Dataset]):
                 merged[src_name].values, std_name, source
             )
             cv = climate_variables.lookup_alias(source, src_name)
-            unit = cv.std_unit.name
             v_name = cv.name
-            merged[src_name].attrs.update(units=unit, name=v_name)
+            merged[src_name].attrs.update(units=UNIT_LABELS[std_name], name=v_name)
 
     rename_dict = climate_variables.aliases_for(source, 'dict_r')
     rename_dict.update({'longitude':'lon', 'latitude':'lat', 'valid_time':'time'})
@@ -374,9 +387,8 @@ def merge_for_year(year: int, datasets: list[xr.Dataset]):
     
     d2m = merged['dewpoint']
     merged['vapo'] = calculate_vapo_from_dewpoint(d2m)
-    unit = climate_variables.CLIMATE_VARIABLES['vapo'].std_unit.name
     v_name = climate_variables.CLIMATE_VARIABLES['vapo'].name
-    merged['vapo'].attrs.update(units=unit, name=v_name)
+    merged['vapo'].attrs.update(units=UNIT_LABELS['vapo'], name=v_name)
 
 
     merged.rio.write_crs('EPSG:4326',inplace=True)\

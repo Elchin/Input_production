@@ -712,6 +712,16 @@ class Region(object):
                     self.logger.warn(f"No units for variable: {v}")
 
             ds_monthly = self.data[ds_key_name].synthesize_to_monthly(target_vars, new_names)
+            # Monthly TEM units (prec is summed to a monthly total). Set
+            # explicitly instead of carrying over cf_units names such as
+            # '0.001 meter' or 'kilogram-second^-3' from the daily data.
+            tem_units = {
+                'tair': 'celsius', 'precip': 'mm/month',
+                'nirr': 'W/m^2', 'vapor_press': 'kPa',
+            }
+            for var, unit in tem_units.items():
+                if var in ds_monthly:
+                    ds_monthly[var].attrs['units'] = unit
 
             # Guard against upstream calculations (e.g. vapor pressure from psl/elevation)
             # unintentionally promoting a variable to float64.

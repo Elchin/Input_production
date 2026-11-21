@@ -222,3 +222,28 @@ def test_export_warns_on_missing_units(tmp_path):
     (tmp_path / 'northslope').mkdir()
     assert r.export_TEM('cru_climate', tmp_path / 'northslope', cru_item='era5-downscaled') == 0
     assert any('No units for variable: vapo' in m.text for m in r.logger.data)
+
+
+# ----------------------------------------------------------- unit labels
+def test_merge_for_year_unit_labels():
+    ds = era5_daily.merge_for_year(2001, synthetic_downloads(2001)).dataset
+    assert {v: ds[v].attrs['units'] for v in ['tair_avg', 'prec', 'nirr', 'vapo']} == \
+        {'tair_avg': 'celsius', 'prec': 'mm', 'nirr': 'W/m^2', 'vapo': 'kPa'}
+    from cf_units import Unit
+    from temds import climate_variables
+    for v in ['tair_avg', 'prec', 'nirr', 'vapo']:  # still equal to std units
+        assert Unit(ds[v].attrs['units']) == climate_variables.temds_units_for(v)
+
+
+def test_export_tem_unit_labels(tmp_path):
+    from temds.datasources.dataset import YearlyDataset
+    from temds.datasources.timeseries import YearlyTimeSeries
+    ds = region_daily_dataset()
+    ds['prec'].attrs['units'] = '0.001 meter'
+    r = ns_region()
+    r.data['era5-downscaled'] = YearlyTimeSeries([YearlyDataset(2000, ds)])
+    (tmp_path / 'northslope').mkdir()
+    r.export_TEM('cru_climate', tmp_path / 'northslope', cru_item='era5-downscaled')
+    with xr.open_dataset(tmp_path / 'northslope/tem_export/era5-downscaled-historic-climate.nc') as out:
+        assert {v: out[v].attrs['units'] for v in ['tair', 'precip', 'nirr', 'vapor_press']} == \
+            {'tair': 'celsius', 'precip': 'mm/month', 'nirr': 'W/m^2', 'vapor_press': 'kPa'}
